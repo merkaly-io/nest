@@ -22,9 +22,6 @@ jobs:
       - run: pnpm build
         shell: bash
 
-      - run: pnpm pack --dry-run
-        shell: bash
-
       - uses: merkaly-io/actions/publish@master
 
   release:
