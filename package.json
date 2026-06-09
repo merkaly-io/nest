@@ -34,15 +34,11 @@
     "test:watch": "jest --watch"
   },
   "dependencies": {
+    "@eslint/js": "^9.39.0",
+    "@nestjs/cli": "^11.0.10",
     "@nestjs/common": "^11.1.18",
     "@nestjs/core": "^11.1.18",
     "@nestjs/microservices": "^11.1.18",
-    "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.1"
-  },
-  "devDependencies": {
-    "@eslint/js": "^9.39.0",
-    "@nestjs/cli": "^11.0.10",
     "@nestjs/schematics": "^11.1.0",
     "@nestjs/testing": "^11.1.6",
     "@types/jest": "^30.0.0",
@@ -54,6 +50,8 @@
     "globals": "^17.6.0",
     "jest": "^30.4.1",
     "prettier": "^3.8.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
     "source-map-support": "^0.5.21",
     "ts-jest": "^29.4.1",
     "ts-node": "^10.9.2",
