@@ -1,0 +1,32 @@
+# Dependencies
+node_modules
+
+# Logs
+*.log*
+
+# Temp directories
+.temp
+.tmp
+.cache
+
+# Build artifacts
+dist
+*.tsbuildinfo
+
+# Environment
+.env
+.env.*
+
+# Testing
+reports
+coverage
+*.lcov
+.nyc_output
+
+# NestJS
+.nest
+
+# OSX
+.DS_Store
+.AppleDouble
+.LSOverride
