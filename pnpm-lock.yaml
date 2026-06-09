@@ -7,13 +7,7 @@ settings:
 importers:
 
   .:
-    devDependencies:
-      '@eslint/js':
-        specifier: ^9.39.0
-        version: 9.39.4
-      '@nestjs/cli':
-        specifier: ^11.0.10
-        version: 11.0.22(@types/node@25.9.2)(prettier@3.8.3)
+    dependencies:
       '@nestjs/common':
         specifier: ^11.1.18
         version: 11.1.26(reflect-metadata@0.2.2)(rxjs@7.8.2)
@@ -23,6 +17,19 @@ importers:
       '@nestjs/microservices':
         specifier: ^11.1.18
         version: 11.1.26(@nestjs/common@11.1.26(reflect-metadata@0.2.2)(rxjs@7.8.2))(@nestjs/core@11.1.26)(reflect-metadata@0.2.2)(rxjs@7.8.2)
+      reflect-metadata:
+        specifier: ^0.2.2
+        version: 0.2.2
+      rxjs:
+        specifier: ^7.8.1
+        version: 7.8.2
+    devDependencies:
+      '@eslint/js':
+        specifier: ^9.39.0
+        version: 9.39.4
+      '@nestjs/cli':
+        specifier: ^11.0.10
+        version: 11.0.22(@types/node@25.9.2)(prettier@3.8.3)
       '@nestjs/schematics':
         specifier: ^11.1.0
         version: 11.1.0(chokidar@4.0.3)(prettier@3.8.3)(typescript@6.0.3)
@@ -56,12 +63,6 @@ importers:
       prettier:
         specifier: ^3.8.0
         version: 3.8.3
-      reflect-metadata:
-        specifier: ^0.2.2
-        version: 0.2.2
-      rxjs:
-        specifier: ^7.8.1
-        version: 7.8.2
       source-map-support:
         specifier: ^0.5.21
         version: 0.5.21
