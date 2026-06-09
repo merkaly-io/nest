@@ -1,6 +1,6 @@
 {
   "name": "@merkaly/nest",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Shared NestJS infrastructure for Merkaly backend apps",
   "repository": {
     "type": "git",
