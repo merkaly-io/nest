@@ -1,0 +1,19 @@
+name: PullRequest & Push main
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: merkaly-io/actions/setup@master
+
+      - run: pnpm lint
+        continue-on-error: true
+
+      - run: pnpm build
