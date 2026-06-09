@@ -1,6 +1,6 @@
 {
   "name": "@merkaly/nest",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Shared NestJS infrastructure for Merkaly backend apps",
   "repository": {
     "type": "git",
@@ -67,13 +67,19 @@
     "typescript-eslint": "^8.61.0"
   },
   "jest": {
-    "moduleFileExtensions": ["js", "json", "ts"],
+    "moduleFileExtensions": [
+      "js",
+      "json",
+      "ts"
+    ],
     "rootDir": "src",
     "testRegex": ".*\\.spec\\.ts$",
     "transform": {
       "^.+\\.(t|j)s$": "ts-jest"
     },
-    "collectCoverageFrom": ["**/*.(t|j)s"],
+    "collectCoverageFrom": [
+      "**/*.(t|j)s"
+    ],
     "coverageDirectory": "../coverage",
     "testEnvironment": "node"
   },
