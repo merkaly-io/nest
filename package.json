@@ -44,7 +44,7 @@
     "@nestjs/schematics": "^11.1.0",
     "@nestjs/testing": "^11.1.6",
     "@types/jest": "^30.0.0",
-    "@types/node": "^26.1.0",
+    "@types/node": "^26.2.0",
     "amqp-connection-manager": "^5.0.0",
     "amqplib": "^2.0.1",
     "class-transformer": "^0.5.1",
