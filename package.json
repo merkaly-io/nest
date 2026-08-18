@@ -36,7 +36,7 @@
   "dependencies": {
     "@eslint/js": "^9.39.0",
     "@nestjs/cli": "^11.0.10",
-    "@nestjs/common": "^11.1.18",
+    "@nestjs/common": "^11.2.1",
     "@nestjs/core": "^11.2.1",
     "@nestjs/event-emitter": "^3.1.0",
     "@nestjs/mapped-types": "^2.1.1",
