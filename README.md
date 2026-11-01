@@ -71,7 +71,7 @@ import {
   env, loadEnv, // config
   LoggerModule, LoggerService, // logger
   ExceptionsFilter, // filtro HTTP JSON global
-  HealthModule, // GET /health
+  HealthModule, HealthService, // status para o GET /health do app
   RabbitModule, EventsPublisher, rabbitConsumerOptions, OnRabbitEvent, ackMessage, nackMessage,
   WebhookEvent, WebhookPatterns, WebhookPattern, createWebhookEvent, toPattern,
   SignatureGuard, safeCompare, hmacDigest, verifyHmac,
@@ -91,7 +91,7 @@ import {
       timeout: env.number('RABBITMQ_PUBLISH_TIMEOUT', 5000),
       required: env.isProduction, // produção não sobe sem url
     }),
-    HealthModule, // inclui o status do broker se RabbitModule estiver importado
+    HealthModule, // fornece HealthService; o endpoint fica no app.controller
   ],
   providers: [{ provide: APP_FILTER, useClass: ExceptionsFilter }],
 })
@@ -100,9 +100,28 @@ export class AppModule {}
 
 `RabbitModule.forRootAsync({ imports, inject, useFactory })` aceita a config injetada.
 
+O pacote não registra controllers. O health fica no `app.controller.ts` de cada app:
+
+```ts
+@Controller('/')
+export class AppController {
+  constructor(private readonly health: HealthService) {}
+
+  @Get('/health')
+  health() {
+    return this.health.check(); // { status: 'ok' | 'degraded', broker?, uptime }; broker só com RabbitModule
+  }
+}
+```
+
 ### Eventos
 
-Envelope `WebhookEvent<T>`: `{ id, source, type, receivedAt, organization?, data }`. Padrão do nome: `<source>.<evento>` em minúsculas (`toPattern('asaas', 'PAYMENT_CONFIRMED')` = `asaas.payment_confirmed`). Os padrões conhecidos ficam em `WebhookPatterns` (Asaas, Stripe, Auth0, AliExpress) e são a fonte única para produtores e consumidores.
+Envelope `WebhookEvent<T>`: `{ id, source, type, receivedAt, organization?, data }`. Padrão do nome: `<source>.<evento>` em minúsculas (`toPattern('asaas', 'PAYMENT_CONFIRMED')` = `asaas.payment_confirmed`). Os padrões conhecidos ficam em `WebhookPatterns` e são a fonte única para produtores e consumidores, iguais ao que o webhooks publica:
+
+- Asaas: `asaas.<evento em minúsculas>` (ex.: `asaas.payment_received`).
+- Stripe: tipo pontuado original (ex.: `stripe.invoice.paid`, `stripe.customer.subscription.updated`).
+- Auth0: nome legível do código de log (ex.: `auth0.success_signup`, `auth0.success_login`, `auth0.user_deleted`) e `auth0.user_login` da Action.
+- AliExpress: tópico do `message_type` (53 `aliexpress.dropshipper_order_status_update`, 18 `aliexpress.waybill_changed`, 15 `aliexpress.product_deleted`); status do pedido DS em `AliexpressOrderStatus`.
 
 ```ts
 await this.events.publish(

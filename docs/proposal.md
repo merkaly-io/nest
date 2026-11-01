@@ -18,8 +18,8 @@
 3. **Infraestrutura compartilhada** (genérica, config injetada, sem constantes de app). Nomes e assinaturas copiados do scaffold do webhooks (PR #1) para a troca ser quase só de import:
    - `RabbitModule.forRoot/forRootAsync` + `EventsPublisher.publish(pattern, event)`: `ClientProxy` `Transport.RMQ`, fila durável, mensagem persistente, resolve só com ack do broker, timeout configurável, `ServiceUnavailableException` em falha, rotas `pattern -> fila`, `required` derruba o boot sem url.
    - Consumo (para depois): `rabbitConsumerOptions()`, `@OnRabbitEvent()`, `ackMessage()`, `nackMessage()`.
-   - Contrato: `WebhookEvent<T>` `{ id, source, type, receivedAt, organization?, data }`, padrão `<source>.<evento>`, `toPattern()`, `createWebhookEvent()` e o registro tipado `WebhookPatterns` (Asaas pagamentos, Stripe assinatura/fatura, Auth0 usuário, AliExpress pedido).
-   - `LoggerModule`/`LoggerService` (padrão do api, `host` opcional para o CLS), `ExceptionsFilter` JSON, `HealthModule` (`GET /health`, inclui broker se houver `RabbitModule`), `env` (dotenv + getters tipados, erro em produção quando falta obrigatório), assinaturas (`safeCompare`, `hmacDigest`, `verifyHmac`, `SignatureGuard`).
+   - Contrato: `WebhookEvent<T>` `{ id, source, type, receivedAt, organization?, data }`, padrão `<source>.<evento>`, `toPattern()`, `createWebhookEvent()` e o registro tipado `WebhookPatterns`, igual ao que o webhooks publica (PRs #2 a #5): Asaas `asaas.payment_received`, Stripe `stripe.invoice.paid`, Auth0 `auth0.success_signup`/`auth0.user_deleted`, AliExpress `aliexpress.dropshipper_order_status_update` (message_type 53), `waybill_changed` (18), `product_deleted` (15), mais `AliexpressOrderStatus`.
+   - `LoggerModule`/`LoggerService` (padrão do api, `host` opcional para o CLS), `ExceptionsFilter` JSON, `HealthModule` + `HealthService.check()` (sem controller: o `GET /health` fica no `app.controller.ts` de cada app, como no api; broker só se houver `RabbitModule`), `env` (dotenv + getters tipados, erro em produção quando falta obrigatório), assinaturas (`safeCompare`, `hmacDigest`, `verifyHmac`, `SignatureGuard`).
 4. **Versão 0.2.0** (minor, quebra: tooling sai das dependências). Sem publicar até o OK do Founder.
 
 ## Layout
@@ -31,7 +31,7 @@ src/
   config/   env, loadEnv
   events/   WebhookEvent, toPattern, createWebhookEvent, WebhookPatterns
   filters/  ExceptionsFilter
-  health/   HealthModule, HealthController
+  health/   HealthModule, HealthService
   logger/   LoggerModule, LoggerService
   rabbit/   RabbitModule, EventsPublisher, consumidor
   signature/ SignatureGuard, safeCompare, hmacDigest, verifyHmac
@@ -66,7 +66,7 @@ export default createConfig({ tsconfigRootDir: import.meta.dirname });
 imports: [
   LoggerModule.forRoot(),
   RabbitModule.forRoot({ url: env.string('RABBITMQ_URL'), queue: 'api_queue', required: env.isProduction }),
-  HealthModule,
+  HealthModule, // HealthService.check() no GET /health do app.controller
 ],
 providers: [{ provide: APP_FILTER, useClass: ExceptionsFilter }],
 ```
@@ -78,7 +78,7 @@ Mais detalhes no [README](../README.md).
 **webhooks.merkaly.io** (primeiro, ainda no PR #1):
 1. `@merkaly/nest` `^0.2.0` + `@merkaly/nest-tooling` `^0.2.0`; remover das deps `@nestjs/common|core|microservices|platform-express`, `amqplib`, `amqp-connection-manager`, `chalk`, `class-*`, `dotenv`, `reflect-metadata`, `rxjs`, e das devDeps ESLint/Prettier/TypeScript/Nest CLI/ts-node/@types.
 2. Trocar `eslint.config.mjs`, `.prettierrc` e tsconfigs pelos extends acima.
-3. Apagar `src/infrastructure/{events,logger,filters,health,signature}` e importar de `@merkaly/nest`. Renomes: `EventsModule` -> `RabbitModule`, `EventsModuleOptions` -> `RabbitModuleOptions`, `EVENTS_*` -> `RABBIT_*`. `EventsPublisher`, `WebhookEvent`, `toPattern`, `createWebhookEvent`, `ExceptionsFilter`, `LoggerService`, `SignatureGuard` e helpers mantêm nome e assinatura. `WebhookRequest` vira tipo estrutural (sem express).
+3. Apagar `src/infrastructure/{events,logger,filters,health,signature}` e importar de `@merkaly/nest`. Renomes: `EventsModule` -> `RabbitModule`, `EventsModuleOptions` -> `RabbitModuleOptions`, `EVENTS_*` -> `RABBIT_*`. `EventsPublisher`, `WebhookEvent`, `toPattern`, `createWebhookEvent`, `ExceptionsFilter`, `LoggerService`, `SignatureGuard` e helpers mantêm nome e assinatura. O `GET /health` do `app.controller.ts` passa a chamar `HealthService.check()`. `WebhookRequest` vira tipo estrutural (sem express).
 4. `AppConfig.RABBITMQ` pode usar `env.*`; publicar com `WebhookPatterns.*` em vez de strings.
 
 **payments.merkaly.io** (quando for ativado): mesmo passo 1 e 2; consumir com `rabbitConsumerOptions` + `@OnRabbitEvent(WebhookPatterns.asaas.*)` + `ackMessage`.
@@ -97,5 +97,5 @@ erp.merkaly.io e fiscal estão deprecados e ficam fora.
 - **Quebra no api ao subir para 0.2.0** sem adicionar o tooling (lint/build sem ESLint/TS). Mitigação: passo 1 da migração no mesmo PR.
 - **Nest 12** já existe (`@nestjs/common` 12.3.x); este pacote fica em 11.2.x. O salto para 12 vira uma release separada e testada no api.
 - **Primeiro publish do tooling**: o trusted publishing (OIDC) do npm precisa do pacote configurado; pode exigir um publish manual inicial.
-- **AliExpress**: o padrão `aliexpress.order_status_changed` é provisório até mapearmos o tipo real da notificação DS.
+- **Registro de padrões duplicado**: os nomes vivem no pacote e no webhooks (`toPattern`); se o webhooks mudar um mapeamento sem atualizar `WebhookPatterns`, o consumidor não recebe. Mitigação: o webhooks publicar usando `WebhookPatterns` ao migrar.
 - **Sem testes** no pacote (decisão atual); a validação é lint, build, `pack` e um app descartável que sobe com os presets e o `RabbitModule`.
