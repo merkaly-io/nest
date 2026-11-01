@@ -17,7 +17,7 @@
 3. **Filas com o nome do repositório**: `<repo>-queue`, ex.: `api.merkaly.io-queue`, `payments.merkaly.io-queue`. O pacote não define fila padrão; cada app passa a sua.
 4. **Sem health no pacote**: o Swagger em `/` responde 200 e serve como health check.
 5. **Sem testes** por enquanto (alinhado ao #38): validação com lint, build, `pack` e um app descartável.
-6. **Versão 0.1.7 (patch)**: o pacote só ganha exports e deps (`@nestjs/platform-express`, `chalk`, `dotenv`); nada é removido nem renomeado. Sem publicar até o OK do Founder.
+6. **Versão 0.1.7 (patch)**: o pacote só ganha exports e deps (`@nestjs/platform-express`, `@nestjs/swagger`, `chalk`, `dotenv`); nada é removido nem renomeado. Sem publicar até o OK do Founder.
 
 ## Layout
 
@@ -54,7 +54,7 @@ Mais detalhes no [README](../README.md).
 ## Migração
 
 **webhooks.merkaly.io** (primeiro, ainda no PR #1):
-1. `@merkaly/nest` `^0.1.7`; remover das deps e devDeps tudo o que o pacote fornece (`@nestjs/common|core|microservices|platform-express|cli|schematics`, `amqplib`, `amqp-connection-manager`, `chalk`, `class-*`, `dotenv`, `reflect-metadata`, `rxjs`, ESLint, Prettier, TypeScript, ts-node, `@types/node`).
+1. `@merkaly/nest` `^0.1.7`; remover das deps e devDeps tudo o que o pacote fornece (`@nestjs/common|core|microservices|platform-express|swagger|cli|schematics`, `amqplib`, `amqp-connection-manager`, `chalk`, `class-*`, `dotenv`, `reflect-metadata`, `rxjs`, ESLint, Prettier, TypeScript, ts-node, `@types/node`).
 2. Apagar `src/infrastructure/{events,logger,filters,signature}` e importar de `@merkaly/nest`. Renomes: `EventsModule` -> `RabbitModule`, `EventsModuleOptions` -> `RabbitModuleOptions`, `EVENTS_*` -> `RABBIT_*`. `EventsPublisher`, `WebhookEvent`, `toPattern`, `createWebhookEvent`, `ExceptionsFilter`, `LoggerService`, `SignatureGuard` e helpers mantêm nome e assinatura. `WebhookRequest` vira tipo estrutural (sem express).
 3. Publicar com `WebhookPatterns.*` e fila `<repo>-queue`.
 
