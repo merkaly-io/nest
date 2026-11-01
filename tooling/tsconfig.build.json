@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "${configDir}/src",
+    "incremental": false
+  },
+  "exclude": [
+    "${configDir}/node_modules",
+    "${configDir}/dist",
+    "${configDir}/coverage",
+    "${configDir}/test",
+    "${configDir}/tests",
+    "${configDir}/**/*.spec.ts",
+    "${configDir}/**/*.e2e-spec.ts"
+  ]
+}

@@ -24,6 +24,12 @@ jobs:
 
       - uses: merkaly-io/actions/publish@master
 
+      - name: Publish @merkaly/nest-tooling
+        run: |
+          test "$(node -p "require('./tooling/package.json').version")" = "${GITHUB_REF_NAME#v}" # lockstep with the tag
+          pnpm --filter @merkaly/nest-tooling publish --access public --no-git-checks
+        shell: bash
+
   release:
     needs: publish
     runs-on: ubuntu-latest

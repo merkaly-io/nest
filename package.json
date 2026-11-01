@@ -1,7 +1,7 @@
 {
   "name": "@merkaly/nest",
-  "version": "0.1.6",
-  "description": "Shared NestJS infrastructure for Merkaly backend apps",
+  "version": "0.2.0",
+  "description": "Shared NestJS runtime for Merkaly backend apps: pinned Nest versions plus RabbitMQ events, logger, filters, health, config and signatures",
   "repository": {
     "type": "git",
     "url": "https://github.com/merkaly-io/nest.git"
@@ -30,40 +30,30 @@
     "lint": "eslint .",
     "prepack": "pnpm build"
   },
+  "prettier": "@merkaly/nest-tooling/prettier",
   "dependencies": {
-    "@eslint/js": "^9.39.0",
-    "@nestjs/cli": "^12.0.0",
-    "@nestjs/common": "^11.2.1",
-    "@nestjs/core": "^11.2.1",
+    "@nestjs/common": "^11.2.8",
+    "@nestjs/core": "^11.2.8",
     "@nestjs/event-emitter": "^12.0.0",
     "@nestjs/mapped-types": "^12.0.0",
-    "@nestjs/microservices": "^11.2.1",
-    "@nestjs/schematics": "^12.0.0",
-    "@types/node": "^26.6.1",
+    "@nestjs/microservices": "^11.2.8",
+    "@nestjs/platform-express": "^11.2.8",
     "amqp-connection-manager": "^5.0.0",
     "amqplib": "^2.2.0",
+    "chalk": "^4.1.2",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
-    "eslint": "^9.39.0",
-    "eslint-config-prettier": "^10.1.8",
-    "eslint-plugin-import": "^2.32.0",
-    "eslint-plugin-prettier": "^5.5.4",
-    "globals": "^17.13.0",
+    "dotenv": "^18.0.9",
     "nestjs-console": "^10.0.0",
-    "prettier": "^3.9.3",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.1",
-    "source-map-support": "^0.5.21",
-    "ts-node": "^10.9.2",
-    "tsconfig-paths": "^4.2.0",
-    "typescript": "^6.0.3",
-    "typescript-eslint": "^8.72.0"
+    "rxjs": "^7.8.1"
+  },
+  "devDependencies": {
+    "@merkaly/nest-tooling": "workspace:*",
+    "changelogen": "^0.6.2"
   },
   "packageManager": "pnpm@10.28.2",
   "engines": {
     "node": ">=24"
-  },
-  "devDependencies": {
-    "changelogen": "^0.6.2"
   }
 }
