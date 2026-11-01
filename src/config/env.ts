@@ -33,8 +33,9 @@ export const env = {
     return isProduction();
   },
 
-  string(name: string, fallback?: string): string | undefined {
-    return raw(name) ?? fallback;
+  string: ((name: string, fallback?: string) => raw(name) ?? fallback) as {
+    (name: string, fallback: string): string;
+    (name: string, fallback?: string): string | undefined;
   },
 
   required(name: string): string | undefined {
@@ -45,7 +46,7 @@ export const env = {
     return value;
   },
 
-  number(name: string, fallback?: number): number | undefined {
+  number: ((name: string, fallback?: number) => {
     const value = raw(name);
 
     if (value === undefined) return fallback;
@@ -54,6 +55,9 @@ export const env = {
     invalid(name, `"${value}" is not a number`);
 
     return fallback;
+  }) as {
+    (name: string, fallback: number): number;
+    (name: string, fallback?: number): number | undefined;
   },
 
   boolean(name: string, fallback = false): boolean {

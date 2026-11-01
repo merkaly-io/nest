@@ -6,7 +6,7 @@ export const RABBIT_CLIENT_FACTORY = Symbol('RABBIT_CLIENT_FACTORY');
 
 export interface RabbitModuleOptions {
   url?: string; // broker url, unset = publishing disabled
-  queue: string; // default target queue
+  queue: string; // default target queue, named <repo>-queue
   routes?: Record<string, string>; // pattern -> queue overrides
   timeout?: number; // ms to wait for the broker ack, default 5000
   required?: boolean; // fail boot when url is missing

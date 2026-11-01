@@ -3,7 +3,7 @@ import { WebhookPattern } from '../events';
 
 export interface RabbitConsumerOptions {
   url: string;
-  queue: string; // queue this service consumes
+  queue: string; // queue this service consumes, <repo>-queue
   prefetchCount?: number; // default 10
 }
 
