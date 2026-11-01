@@ -1,72 +1,50 @@
-# Proposta: @merkaly/nest como biblioteca de infraestrutura (0.2.0)
+# Proposta: @merkaly/nest como biblioteca de infraestrutura (0.1.7)
 
 ## Problema hoje
 
-- `@merkaly/nest` 0.1.x não tem código (`export {}`). Só agrupa dependências.
-- Mistura runtime e tooling: ESLint, Prettier, TypeScript, Nest CLI e ts-node viajam como `dependencies` e entram no install de produção de todo app.
-- Cada serviço novo (webhooks, payments) reimplementa logger, filtro, health, cliente RabbitMQ e verificação de assinatura, e repete ~20 devDependencies com versões que divergem (o scaffold do webhooks já declara `@nestjs/*`, `rxjs`, `amqplib` por conta própria).
+- `@merkaly/nest` 0.1.6 não tem código (`export {}`). Só agrupa dependências.
+- Cada serviço novo (webhooks, payments) reimplementa logger, filtro, cliente RabbitMQ e verificação de assinatura, e acaba declarando `@nestjs/*`, `rxjs`, `amqplib` por conta própria, com versões que divergem.
 - Não existe contrato compartilhado de eventos: produtor (webhooks) e consumidores (payments, api) teriam que combinar nomes de padrão à mão.
 
 ## Decisões
 
-1. **Fonte única de versões.** `@merkaly/nest` fixa as versões de `@nestjs/*` e das libs de runtime; os apps recebem tudo via `shamefully-hoist`. Nest continua em `dependencies` (sem peerDependencies). Regra: o app nunca declara um pacote fornecido por `@merkaly/nest` ou `@merkaly/nest-tooling`; o que ele importa e não está nesses pacotes (dotenv fora do helper, mongoose, stripe, express...) é declarado no app, nunca usado de forma transitiva.
-2. **Tooling em pacote separado, no mesmo repo: `@merkaly/nest-tooling`** (pasta `tooling/`, workspace pnpm, mesma versão e mesma tag).
-   - Por que não um subpath `@merkaly/nest/tooling`: um subpath compartilha as `dependencies` do pacote, então ESLint/TypeScript continuariam entrando no install de produção. Só um pacote separado em `devDependencies` deixa a produção enxuta.
-   - Custos: dois pacotes para publicar (o workflow de release publica os dois na mesma tag) e o primeiro publish do `@merkaly/nest-tooling` precisa configurar o trusted publisher no npm.
-   - Conteúdo: `createConfig()` do ESLint 9 (igual ao config atual do api), Prettier (printWidth 100, singleQuote, trailingComma all), `tsconfig.base.json` e `tsconfig.build.json` com `${configDir}`, Nest CLI + schematics, TypeScript, ts-node, tsconfig-paths, `@types/node`, `@types/express`.
-   - Sem Jest por enquanto (regra do Founder: sem specs nos serviços backend, alinhado ao #38). Quando voltar, entra como preset no tooling.
-3. **Infraestrutura compartilhada** (genérica, config injetada, sem constantes de app). Nomes e assinaturas copiados do scaffold do webhooks (PR #1) para a troca ser quase só de import:
+1. **Fonte única de versões.** `@merkaly/nest` fixa as versões de `@nestjs/*`, das libs de runtime **e do tooling de desenvolvimento** (ESLint, Prettier, TypeScript, typescript-eslint, Nest CLI, ts-node, `@types/node`), tudo em `dependencies`, sem peerDependencies. Os apps recebem tudo via `shamefully-hoist`. Regra: o app nunca declara um pacote fornecido por `@merkaly/nest`; o que ele importa e não está no pacote (mongoose, stripe, express, `@nestjs/swagger`...) é declarado no app, nunca usado de forma transitiva.
+2. **Infraestrutura compartilhada** (genérica, config injetada, sem constantes de app). Nomes e assinaturas vêm do scaffold do webhooks (PR #1) para a troca ser quase só de import:
    - `RabbitModule.forRoot/forRootAsync` + `EventsPublisher.publish(pattern, event)`: `ClientProxy` `Transport.RMQ`, fila durável, mensagem persistente, resolve só com ack do broker, timeout configurável, `ServiceUnavailableException` em falha, rotas `pattern -> fila`, `required` derruba o boot sem url.
    - Consumo (para depois): `rabbitConsumerOptions()`, `@OnRabbitEvent()`, `ackMessage()`, `nackMessage()`.
    - Contrato: `WebhookEvent<T>` `{ id, source, type, receivedAt, organization?, data }`, padrão `<source>.<evento>`, `toPattern()`, `createWebhookEvent()` e o registro tipado `WebhookPatterns`, igual ao que o webhooks publica (PRs #2 a #5): Asaas `asaas.payment_received`, Stripe `stripe.invoice.paid`, Auth0 `auth0.success_signup`/`auth0.user_deleted`, AliExpress `aliexpress.dropshipper_order_status_update` (message_type 53), `waybill_changed` (18), `product_deleted` (15), mais `AliexpressOrderStatus`.
-   - `LoggerModule`/`LoggerService` (padrão do api, `host` opcional para o CLS), `ExceptionsFilter` JSON, `HealthModule` + `HealthService.check()` (sem controller: o `GET /health` fica no `app.controller.ts` de cada app, como no api; broker só se houver `RabbitModule`), `env` (dotenv + getters tipados, erro em produção quando falta obrigatório), assinaturas (`safeCompare`, `hmacDigest`, `verifyHmac`, `SignatureGuard`).
-4. **Versão 0.2.0** (minor, quebra: tooling sai das dependências). Sem publicar até o OK do Founder.
+   - `LoggerModule`/`LoggerService` (padrão do api, `host` opcional para o CLS), `ExceptionsFilter` JSON, `env` (dotenv + getters tipados, erro em produção quando falta obrigatório), assinaturas (`safeCompare`, `hmacDigest`, `verifyHmac`, `SignatureGuard`).
+3. **Filas com o nome do repositório**: `<repo>-queue`, ex.: `api.merkaly.io-queue`, `payments.merkaly.io-queue`. O pacote não define fila padrão; cada app passa a sua.
+4. **Sem health no pacote**: o Swagger em `/` responde 200 e serve como health check.
+5. **Sem testes** por enquanto (alinhado ao #38): validação com lint, build, `pack` e um app descartável.
+6. **Versão 0.1.7 (patch)**: o pacote só ganha exports e deps (`@nestjs/platform-express`, `chalk`, `dotenv`); nada é removido nem renomeado. Sem publicar até o OK do Founder.
 
 ## Layout
 
 ```
-package.json            @merkaly/nest (runtime)
-pnpm-workspace.yaml     packages: [tooling]
 src/
-  config/   env, loadEnv
-  events/   WebhookEvent, toPattern, createWebhookEvent, WebhookPatterns
-  filters/  ExceptionsFilter
-  health/   HealthModule, HealthService
-  logger/   LoggerModule, LoggerService
-  rabbit/   RabbitModule, EventsPublisher, consumidor
+  config/    env, loadEnv
+  events/    WebhookEvent, toPattern, createWebhookEvent, WebhookPatterns, AliexpressOrderStatus
+  filters/   ExceptionsFilter
+  logger/    LoggerModule, LoggerService
+  rabbit/    RabbitModule, EventsPublisher, consumidor
   signature/ SignatureGuard, safeCompare, hmacDigest, verifyHmac
-tooling/
-  package.json          @merkaly/nest-tooling (dev)
-  eslint.mjs  prettier.json  tsconfig.base.json  tsconfig.build.json
 ```
 
 ## Como um app consome
 
 ```json
-{
-  "prettier": "@merkaly/nest-tooling/prettier",
-  "dependencies": { "@merkaly/nest": "^0.2.0" },
-  "devDependencies": { "@merkaly/nest-tooling": "^0.2.0" }
-}
-```
-
-```js
-// eslint.config.mjs
-import { createConfig } from '@merkaly/nest-tooling/eslint';
-export default createConfig({ tsconfigRootDir: import.meta.dirname });
-```
-
-```json
-// tsconfig.json / tsconfig.build.json
-{ "extends": "@merkaly/nest-tooling/tsconfig.base.json" }
-{ "extends": ["./tsconfig.json", "@merkaly/nest-tooling/tsconfig.build.json"] }
+{ "dependencies": { "@merkaly/nest": "^0.1.7" } }
 ```
 
 ```ts
 imports: [
   LoggerModule.forRoot(),
-  RabbitModule.forRoot({ url: env.string('RABBITMQ_URL'), queue: 'api_queue', required: env.isProduction }),
-  HealthModule, // HealthService.check() no GET /health do app.controller
+  RabbitModule.forRoot({
+    url: env.string('RABBITMQ_URL'),
+    queue: 'api.merkaly.io-queue',
+    required: env.isProduction,
+  }),
 ],
 providers: [{ provide: APP_FILTER, useClass: ExceptionsFilter }],
 ```
@@ -76,26 +54,26 @@ Mais detalhes no [README](../README.md).
 ## Migração
 
 **webhooks.merkaly.io** (primeiro, ainda no PR #1):
-1. `@merkaly/nest` `^0.2.0` + `@merkaly/nest-tooling` `^0.2.0`; remover das deps `@nestjs/common|core|microservices|platform-express`, `amqplib`, `amqp-connection-manager`, `chalk`, `class-*`, `dotenv`, `reflect-metadata`, `rxjs`, e das devDeps ESLint/Prettier/TypeScript/Nest CLI/ts-node/@types.
-2. Trocar `eslint.config.mjs`, `.prettierrc` e tsconfigs pelos extends acima.
-3. Apagar `src/infrastructure/{events,logger,filters,health,signature}` e importar de `@merkaly/nest`. Renomes: `EventsModule` -> `RabbitModule`, `EventsModuleOptions` -> `RabbitModuleOptions`, `EVENTS_*` -> `RABBIT_*`. `EventsPublisher`, `WebhookEvent`, `toPattern`, `createWebhookEvent`, `ExceptionsFilter`, `LoggerService`, `SignatureGuard` e helpers mantêm nome e assinatura. O `GET /health` do `app.controller.ts` passa a chamar `HealthService.check()`. `WebhookRequest` vira tipo estrutural (sem express).
-4. `AppConfig.RABBITMQ` pode usar `env.*`; publicar com `WebhookPatterns.*` em vez de strings.
+1. `@merkaly/nest` `^0.1.7`; remover das deps e devDeps tudo o que o pacote fornece (`@nestjs/common|core|microservices|platform-express|cli|schematics`, `amqplib`, `amqp-connection-manager`, `chalk`, `class-*`, `dotenv`, `reflect-metadata`, `rxjs`, ESLint, Prettier, TypeScript, ts-node, `@types/node`).
+2. Apagar `src/infrastructure/{events,logger,filters,signature}` e importar de `@merkaly/nest`. Renomes: `EventsModule` -> `RabbitModule`, `EventsModuleOptions` -> `RabbitModuleOptions`, `EVENTS_*` -> `RABBIT_*`. `EventsPublisher`, `WebhookEvent`, `toPattern`, `createWebhookEvent`, `ExceptionsFilter`, `LoggerService`, `SignatureGuard` e helpers mantêm nome e assinatura. `WebhookRequest` vira tipo estrutural (sem express).
+3. Publicar com `WebhookPatterns.*` e fila `<repo>-queue`.
 
-**payments.merkaly.io** (quando for ativado): mesmo passo 1 e 2; consumir com `rabbitConsumerOptions` + `@OnRabbitEvent(WebhookPatterns.asaas.*)` + `ackMessage`.
+**payments.merkaly.io** (quando for ativado): mesmo passo 1; consumir `payments.merkaly.io-queue` com `rabbitConsumerOptions` + `@OnRabbitEvent(WebhookPatterns.asaas.*)` + `ackMessage`.
 
 **api.merkaly.io** (depois, sem pressa):
-1. Bump para `^0.2.0` e adicionar `@merkaly/nest-tooling` em devDependencies (hoje ESLint/TS chegam pelo runtime; sem isso o lint/build quebra).
-2. Remover `chalk` das deps; declarar `dotenv` só se continuar importando direto.
-3. Configs por extends; o api mantém `rootDir: "./"` e `paths` próprios no `tsconfig.json` (tem `app.ts` na raiz e roda `dist/src/main`).
-4. Opcional: trocar o `LoggerService` próprio pelo do pacote com `host` do CLS; o bootstrap Rabbit comentado vira `rabbitConsumerOptions` quando o consumo for aprovado.
+1. Bump para `^0.1.7`; remover `chalk` das deps e `dotenv` das devDeps (agora vêm do pacote).
+2. Opcional: trocar o `LoggerService` próprio pelo do pacote com `host` do CLS; o bootstrap Rabbit comentado vira `rabbitConsumerOptions({ queue: 'api.merkaly.io-queue' })` quando o consumo for aprovado.
 
 erp.merkaly.io e fiscal estão deprecados e ficam fora.
 
+## Futuro
+
+- **Tooling separado**: mover ESLint, Prettier, tsconfig e Nest CLI para um pacote de desenvolvimento próprio (para a produção não instalar tooling e os apps só estenderem configs) quando migrarmos do npm para o GitHub Packages. Hoje não é prioridade.
+- **Enum de eventos**: um passo seguinte declara um enum registrando todos os eventos de webhook (substitui/estende o `WebhookPatterns` atual), para produtor e consumidores usarem os mesmos nomes sem strings.
+- **Nest 12**: `@nestjs/common` 12.x já existe; o salto vira uma release separada e testada no api.
+
 ## Riscos
 
-- **Hoisting implícito**: depende de `shamefully-hoist=true` em cada app; sem isso imports de `@nestjs/*` quebram. Mitigação: `.npmrc` no template dos apps.
-- **Quebra no api ao subir para 0.2.0** sem adicionar o tooling (lint/build sem ESLint/TS). Mitigação: passo 1 da migração no mesmo PR.
-- **Nest 12** já existe (`@nestjs/common` 12.3.x); este pacote fica em 11.2.x. O salto para 12 vira uma release separada e testada no api.
-- **Primeiro publish do tooling**: o trusted publishing (OIDC) do npm precisa do pacote configurado; pode exigir um publish manual inicial.
-- **Registro de padrões duplicado**: os nomes vivem no pacote e no webhooks (`toPattern`); se o webhooks mudar um mapeamento sem atualizar `WebhookPatterns`, o consumidor não recebe. Mitigação: o webhooks publicar usando `WebhookPatterns` ao migrar.
-- **Sem testes** no pacote (decisão atual); a validação é lint, build, `pack` e um app descartável que sobe com os presets e o `RabbitModule`.
+- **Hoisting implícito**: depende de `shamefully-hoist=true` em cada app; sem isso imports de `@nestjs/*` quebram.
+- **Tooling no install de produção**: ESLint/TypeScript continuam em `dependencies` (como na 0.1.6) até o pacote de tooling existir.
+- **Registro de padrões duplicado**: os nomes vivem no pacote e no webhooks (`toPattern`); se o webhooks mudar um mapeamento sem atualizar `WebhookPatterns`, o consumidor não recebe. Mitigação: o webhooks publicar usando `WebhookPatterns` ao migrar, e depois o enum.

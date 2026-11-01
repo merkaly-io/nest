@@ -1,18 +1,16 @@
 # @merkaly/nest
 
-Runtime compartilhado dos backends NestJS da Merkaly (api, webhooks, payments). Este repositório publica dois pacotes, sempre com a mesma versão:
+Pacote compartilhado dos backends NestJS da Merkaly (api, webhooks, payments). Faz duas coisas:
 
-| Pacote | Onde entra no app | Conteúdo |
-| --- | --- | --- |
-| `@merkaly/nest` | `dependencies` | versões de `@nestjs/*`, rxjs, amqplib, class-validator, dotenv... e a infraestrutura comum (RabbitMQ, logger, filtro, health, env, assinaturas) |
-| `@merkaly/nest-tooling` | `devDependencies` | ESLint 9, Prettier, TypeScript, tsconfig base/build, Nest CLI, ts-node |
+1. **Fonte única de versões**: fixa `@nestjs/*`, rxjs, amqplib, class-validator, dotenv e também o tooling de desenvolvimento (ESLint, Prettier, TypeScript, typescript-eslint, Nest CLI, ts-node, `@types/node`).
+2. **Infraestrutura comum**: RabbitMQ (publisher + consumidor), contrato de eventos de webhook, logger, filtro de exceções, env e assinaturas.
 
 Proposta e motivação: [docs/proposal.md](docs/proposal.md).
 
 ## Regra de versões
 
-- O app **nunca** declara pacotes que `@merkaly/nest` ou `@merkaly/nest-tooling` já fornecem (`@nestjs/common`, `@nestjs/core`, `@nestjs/microservices`, `@nestjs/platform-express`, `rxjs`, `amqplib`, `class-validator`, `dotenv`, `eslint`, `typescript`...). Eles chegam ao app pelo `shamefully-hoist`.
-- Tudo o que o app importa e **não** está nesses pacotes (ex.: `mongoose`, `stripe`, `express`, `@nestjs/mongoose`) é declarado no próprio app. Nunca dependa de um pacote transitivo que não esteja na lista.
+- O app **nunca** declara pacotes que `@merkaly/nest` já fornece (veja `dependencies` no `package.json`). Eles chegam ao app pelo `shamefully-hoist`.
+- Tudo o que o app importa e **não** está nesse pacote (ex.: `mongoose`, `stripe`, `express`, `@nestjs/mongoose`, `@nestjs/swagger`) é declarado no próprio app. Nunca dependa de um pacote transitivo que não esteja na lista.
 
 ## Uso em um app
 
@@ -27,42 +25,13 @@ strict-peer-dependencies=false
 
 ```json
 {
-  "scripts": {
-    "build": "nest build",
-    "dev": "nest start --watch --no-shell",
-    "lint": "eslint \"src/**/*.ts\" --fix",
-    "format": "prettier --write \"src/**/*.ts\"",
-    "start": "node dist/main"
-  },
-  "prettier": "@merkaly/nest-tooling/prettier",
   "dependencies": {
-    "@merkaly/nest": "^0.2.0"
-  },
-  "devDependencies": {
-    "@merkaly/nest-tooling": "^0.2.0"
+    "@merkaly/nest": "^0.1.7"
   }
 }
 ```
 
-`eslint.config.mjs`
-
-```js
-import { createConfig } from '@merkaly/nest-tooling/eslint';
-
-export default createConfig({ tsconfigRootDir: import.meta.dirname }); // opcional: ignores, rules
-```
-
-`tsconfig.json` e `tsconfig.build.json`
-
-```json
-{ "extends": "@merkaly/nest-tooling/tsconfig.base.json" }
-```
-
-```json
-{ "extends": ["./tsconfig.json", "@merkaly/nest-tooling/tsconfig.build.json"] }
-```
-
-O build compila `src/` para `dist/` (`rootDir`/`outDir` usam `${configDir}`). Opções próprias (ex.: `paths`, `rootDir: "./"` no api) ficam no `tsconfig.json` do app. O `nest-cli.json` continua no app (5 linhas, o Nest CLI não suporta `extends`).
+`eslint.config.mjs`, `.prettierrc`, `tsconfig.json` e `nest-cli.json` continuam no app (mesmo conteúdo do api).
 
 ## API
 
@@ -71,9 +40,8 @@ import {
   env, loadEnv, // config
   LoggerModule, LoggerService, // logger
   ExceptionsFilter, // filtro HTTP JSON global
-  HealthModule, HealthService, // status para o GET /health do app
   RabbitModule, EventsPublisher, rabbitConsumerOptions, OnRabbitEvent, ackMessage, nackMessage,
-  WebhookEvent, WebhookPatterns, WebhookPattern, createWebhookEvent, toPattern,
+  WebhookEvent, WebhookPatterns, WebhookPattern, AliexpressOrderStatus, createWebhookEvent, toPattern,
   SignatureGuard, safeCompare, hmacDigest, verifyHmac,
 } from '@merkaly/nest';
 ```
@@ -86,12 +54,11 @@ import {
     LoggerModule.forRoot(), // global; opcional: { host: () => cls.get('host') }
     RabbitModule.forRoot({
       url: env.string('RABBITMQ_URL'), // sem url: publish rejeita com 503
-      queue: env.string('RABBITMQ_QUEUE', 'api_queue'),
-      routes: { [WebhookPatterns.asaas.PAYMENT_CONFIRMED]: 'payments_queue' }, // opcional
+      queue: env.string('RABBITMQ_QUEUE', 'api.merkaly.io-queue'), // <repo>-queue
+      routes: { [WebhookPatterns.asaas.PAYMENT_CONFIRMED]: 'payments.merkaly.io-queue' }, // opcional
       timeout: env.number('RABBITMQ_PUBLISH_TIMEOUT', 5000),
       required: env.isProduction, // produção não sobe sem url
     }),
-    HealthModule, // fornece HealthService; o endpoint fica no app.controller
   ],
   providers: [{ provide: APP_FILTER, useClass: ExceptionsFilter }],
 })
@@ -100,19 +67,9 @@ export class AppModule {}
 
 `RabbitModule.forRootAsync({ imports, inject, useFactory })` aceita a config injetada.
 
-O pacote não registra controllers. O health fica no `app.controller.ts` de cada app:
+**Filas**: o nome é o do repositório do serviço que consome, `<repo>-queue` (ex.: `api.merkaly.io-queue`, `payments.merkaly.io-queue`). O pacote não tem fila padrão: cada app passa a sua.
 
-```ts
-@Controller('/')
-export class AppController {
-  constructor(private readonly health: HealthService) {}
-
-  @Get('/health')
-  health() {
-    return this.health.check(); // { status: 'ok' | 'degraded', broker?, uptime }; broker só com RabbitModule
-  }
-}
-```
+**Health check**: o pacote não registra controllers. O Swagger servido em `/` responde 200 e funciona como health check.
 
 ### Eventos
 
@@ -133,7 +90,7 @@ await this.events.publish(
 Consumidor (quando o api ou o payments passarem a consumir):
 
 ```ts
-app.connectMicroservice(rabbitConsumerOptions({ url, queue: 'payments_queue' }));
+app.connectMicroservice(rabbitConsumerOptions({ url, queue: 'api.merkaly.io-queue' }));
 await app.startAllMicroservices();
 
 @OnRabbitEvent(WebhookPatterns.asaas.PAYMENT_CONFIRMED)
@@ -158,4 +115,4 @@ pnpm lint
 pnpm build
 ```
 
-Release: tag `vX.Y.Z` publica os dois pacotes (versões em `package.json` e `tooling/package.json` devem bater com a tag).
+Release: tag `vX.Y.Z` (igual à versão do `package.json`) publica no npm.
