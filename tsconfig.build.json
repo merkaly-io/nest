@@ -1,4 +1,4 @@
 {
-  "extends": ["./tsconfig.json", "@merkaly/nest-tooling/tsconfig.build.json"],
-  "include": ["src/**/*"]
+  "extends": "./tsconfig.json",
+  "exclude": ["node_modules", "dist"]
 }
