@@ -36,7 +36,7 @@ export class EventsConsumer {
   ): Promise<void> {
     const started = Date.now();
     const scope = {
-      origin: event?.source ?? event?.producer ?? 'unknown',
+      origin: event?.producer ?? 'unknown', // who published it (the broker is only transport), like the HTTP origin
       scope: () => event?.organization,
     };
     const line = (text: string) =>
