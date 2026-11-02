@@ -13,7 +13,7 @@ const levelColors: Partial<Record<LogLevel, Chalk.Chalk>> = {
   verbose: chalk.cyanBright,
 };
 
-const WIDTH = { level: 7, origin: 24, scope: 22, kind: 16 }; // message always starts at the same column
+const WIDTH = { level: 7, origin: 24, scope: 22 }; // the description always starts at the same column
 
 const fit = (value: string | undefined, width: number) => {
   const text = value || '-';
@@ -21,7 +21,7 @@ const fit = (value: string | undefined, width: number) => {
   return text.length > width ? `${text.slice(0, width - 1)}…` : text.padEnd(width);
 };
 
-// `LEVEL ORIGIN SCOPE KIND MESSAGE`, fixed widths, `-` when missing
+// `LEVEL ORIGIN SCOPE KIND:: MESSAGE`, fixed widths, `-` when missing; KIND opens the description, never cut
 @Injectable()
 export class LoggerService {
   constructor(@Optional() @Inject(LOGGER_OPTIONS) private readonly options?: LoggerModuleOptions) {}
@@ -71,8 +71,7 @@ export class LoggerService {
       color(fit(tier.toUpperCase(), WIDTH.level)),
       chalk.hex('#00FF77')(fit(origin, WIDTH.origin)),
       chalk.cyan(fit(scope, WIDTH.scope)),
-      chalk.hex('#FFA500')(fit(kind, WIDTH.kind)),
-      message,
+      kind ? `${chalk.hex('#FFA500')(`${kind}::`)} ${message}` : message,
     );
 
     return console.log(output.join(' '));
