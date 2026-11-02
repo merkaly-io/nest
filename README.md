@@ -39,7 +39,7 @@ strict-peer-dependencies=false
 import {
   env, loadEnv, // config
   LoggerModule, LoggerService, // logger
-  requestLogger, requestOrigin, requestContext, bodyParsers, bodyParserReason, // uma linha por request
+  requestLogger, requestOrigin, requestContext, noteRequest, bodyParsers, bodyParserReason, // uma linha por request
   AbstractExceptionFilter, ExceptionsFilter, rememberError, // filtros (motivo do erro para o log)
   RabbitModule, EventsPublisher, EventsConsumer, EventRejectedException, // eventos
   rabbitConsumerOptions, assertConsumerTopology, OnMerkalyEvent,
@@ -89,16 +89,17 @@ Error: boom
 
 - **ORIGIN** (24): quem fez o request, nas linhas de request e nos logs internos emitidos durante ele: `x-merkaly-host`, senão o host do `Origin`, `cf-connecting-ip`, o primeiro `x-forwarded-for` ou o socket (`requestOrigin`). Fora de um request, o `service`.
 - **SCOPE** (22): contexto de negócio definido pelo app (`requestLogger({ scope })` ou `LoggerModule({ scope })`, ex.: id da organização). Nas linhas de request é resolvido ao terminar a resposta, então pega o que os guards definiram.
-- **KIND** (16): método HTTP nas linhas de request; nos logs internos, o `group` de quem loga.
+- **KIND** (16): método HTTP nas linhas de request; nos logs internos, o `group` de quem loga. Com `requestLogger({ kind })` a linha de request usa esse valor (ex.: o evento do webhook) e o método passa a abrir a mensagem: `PAYMENT_RECEIVED POST /asaas 200 44ms`.
 - **MESSAGE**: `/path STATUS Nms "motivo"` (motivo cortado em 200, sem query, body nem headers) ou o texto. Nível: `ERROR` em 5xx com o stack embaixo, `WARN` em 4xx, `LOG` no resto.
 
 ```ts
 // main.ts
-app.use(requestLogger(app)); // antes do Swagger; opcional { scope: (req) => 'stripe' }
+app.use(requestLogger(app)); // antes do Swagger; opcional { scope: (req) => 'stripe', kind: (req) => req.body?.event }
 bodyParsers(app, { raw: ['/webhook/stripe'] }); // json + urlencoded com motivo seguro ("Invalid JSON body")
 SwaggerModule.setup('/', app, document);
 ```
 
+- `noteRequest(texto, nível?)` soma um resultado ao fim da linha do request (`-> payment.received`, `"discarded"`) em vez de uma linha separada; o nível só sobe (`warn`/`error`). Fora de um request devolve `false`. O `EventsPublisher` usa isso: dentro de um request o `emit` vira `-> <tipo>` na linha do request, fora dele continua com linha própria.
 - O ORIGIN do request fica num `AsyncLocalStorage` do pacote (`requestContext`). O `requestLogger` cria o contexto e o `LoggerModule` registra um middleware que volta a entrar nele depois dos body parsers (que podem perder o contexto assíncrono), igual ao `nestjs-cls`.
 - `bodyParsers(app, { raw?, rawBody? })`: `raw` mantém o body como Buffer nesses paths; `rawBody: true` preenche `req.rawBody` (igual ao `NestFactory.create(..., { rawBody: true })`, que deixa de registrar os próprios parsers).
 - SCOPE com CLS, sem o pacote depender de `nestjs-cls`:
