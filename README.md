@@ -41,8 +41,9 @@ import {
   LoggerModule, LoggerService, // logger
   requestLogger, requestOrigin, requestContext, bodyParsers, bodyParserReason, // uma linha por request
   AbstractExceptionFilter, ExceptionsFilter, rememberError, // filtros (motivo do erro para o log)
-  RabbitModule, EventsPublisher, rabbitConsumerOptions, OnRabbitEvent, ackMessage, nackMessage,
-  WebhookEvent, WebhookPatterns, WebhookPattern, AliexpressOrderStatus, createWebhookEvent, toPattern,
+  RabbitModule, EventsPublisher, EventsConsumer, EventRejectedException, // eventos
+  rabbitConsumerOptions, assertConsumerTopology, OnMerkalyEvent,
+  MerkalyEvent, MerkalyEventType, MerkalyProducer, EventDataMap, createMerkalyEvent, AliexpressOrderStatus,
   SignatureGuard, safeCompare, hmacDigest, verifyHmac,
 } from '@merkaly/nest';
 ```
@@ -54,9 +55,8 @@ import {
   imports: [
     LoggerModule.forRoot({ service: 'webhooks.merkaly.io' }), // global
     RabbitModule.forRoot({
-      url: env.string('RABBITMQ_URL'), // sem url: publish rejeita com 503
-      queue: env.string('RABBITMQ_QUEUE', 'api.merkaly.io-queue'), // <repo>-queue
-      routes: { [WebhookPatterns.asaas.PAYMENT_CONFIRMED]: 'payments.merkaly.io-queue' }, // opcional
+      url: env.string('RABBITMQ_URL'), // sem url: emit rejeita com 503
+      producer: MerkalyProducer.WEBHOOKS, // vai em todo evento
       timeout: env.number('RABBITMQ_PUBLISH_TIMEOUT', 5000),
       required: env.isProduction, // produção não sobe sem url
     }),
@@ -68,7 +68,7 @@ export class AppModule {}
 
 `RabbitModule.forRootAsync({ imports, inject, useFactory })` aceita a config injetada.
 
-**Filas**: o nome é o do repositório do serviço que consome, `<repo>-queue` (ex.: `api.merkaly.io-queue`, `payments.merkaly.io-queue`). O pacote não tem fila padrão: cada app passa a sua.
+**Exchange e filas**: o produtor publica no exchange topic `merkaly.events` com o tipo do evento como routing key e nunca conhece uma fila. Cada consumidor declara a sua fila, com o nome do repositório (`api.merkaly.io`, `payments.merkaly.io`), e o Nest a liga a cada tipo que ele escuta. Um consumidor novo não toca no produtor.
 
 **Health check**: o pacote não registra controllers. O Swagger servido em `/` responde 200 e funciona como health check.
 
@@ -114,31 +114,50 @@ LoggerModule.forRootAsync({
 
 ### Eventos
 
-Envelope `WebhookEvent<T>`: `{ id, source, type, receivedAt, organization?, data }`. Padrão do nome: `<source>.<evento>` em minúsculas (`toPattern('asaas', 'PAYMENT_CONFIRMED')` = `asaas.payment_confirmed`). Os padrões conhecidos ficam em `WebhookPatterns` e são a fonte única para produtores e consumidores, iguais ao que o webhooks publica:
-
-- Asaas: `asaas.<evento em minúsculas>` (ex.: `asaas.payment_received`).
-- Stripe: tipo pontuado original (ex.: `stripe.invoice.paid`, `stripe.customer.subscription.updated`).
-- Auth0: nome legível do código de log (ex.: `auth0.success_signup`, `auth0.success_login`, `auth0.user_deleted`) e `auth0.user_login` da Action.
-- AliExpress: tópico do `message_type` (53 `aliexpress.dropshipper_order_status_update`, 18 `aliexpress.waybill_changed`, 15 `aliexpress.product_deleted`); status do pedido DS em `AliexpressOrderStatus`.
+Contrato completo em [`docs/events.md`](docs/events.md). Eventos de negócio normalizados (`payment.received`, nunca `asaas.payment_received`): se o provedor muda, o consumidor não muda.
 
 ```ts
-await this.events.publish(
-  WebhookPatterns.asaas.PAYMENT_CONFIRMED,
-  createWebhookEvent({ id: body.id, source: 'asaas', type: body.event, data: body.payment }),
-); // resolve só com ack do broker; timeout ou falha: ServiceUnavailableException
+// produtor: data tipado pelo tipo; resolve com o evento ou ServiceUnavailableException (o provedor reintenta)
+await this.events.emit(MerkalyEventType.PAYMENT_RECEIVED, { ...paymentRef, receivedAt }, {
+  id: `asaas:${body.id}`, source: 'asaas', organization, occurredAt, raw: { type: body.event, payload },
+});
 ```
 
-Consumidor (quando o api ou o payments passarem a consumir):
+Consumidor:
 
 ```ts
-app.connectMicroservice(rabbitConsumerOptions({ url, queue: 'api.merkaly.io-queue' }));
+// main.ts
+const consumer = { url, queue: 'api.merkaly.io' };
+await assertConsumerTopology(consumer); // cria .retry e .dlq
+app.connectMicroservice(rabbitConsumerOptions(consumer));
 await app.startAllMicroservices();
 
-@OnRabbitEvent(WebhookPatterns.asaas.PAYMENT_CONFIRMED)
-handle(@Payload() event: WebhookEvent, @Ctx() context: RmqContext) {
-  return this.service.confirm(event).then(() => ackMessage(context));
+// módulo: `around` roda cada mensagem dentro do contexto do app (ex.: CLS com a organização)
+RabbitModule.forConsumerAsync({
+  inject: [ClsService],
+  useFactory: (cls: ClsService) => ({
+    queue: 'api.merkaly.io',
+    around: (event, next) => cls.run(() => { cls.set('identity', event.organization); return next(); }),
+  }),
+});
+
+// handler
+@OnMerkalyEvent(MerkalyEventType.PAYMENT_RECEIVED)
+received(@Payload() event: MerkalyEvent<MerkalyEventType.PAYMENT_RECEIVED>, @Ctx() context: RmqContext) {
+  return this.consumer.handle(event, context, (e) => this.payments.refresh(e.data.saleId));
 }
 ```
+
+`EventsConsumer.handle` fecha a mensagem e loga uma linha (`ORIGIN` = provedor, `SCOPE` = organização, `KIND` = `EVENT`):
+
+| Resultado | O que acontece |
+| --- | --- |
+| Sucesso | `ack`. |
+| `EventRejectedException` (venda inexistente, valor diferente...) | `ack` + `WARN`: reintentar não resolve. |
+| Outro erro (Mongo, rede, provedor fora) | Vai para `<fila>.retry` (30 s) e volta; depois de 5 tentativas, `<fila>.dlq`. |
+| Malformado ou `version` maior que a do handler | `<fila>.dlq` direto. |
+
+A fila principal descarta para a `.dlq` o que ficar 7 dias sem consumo ou passar de 10.000 mensagens.
 
 ### Env
 

@@ -6,100 +6,102 @@ import {
   Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
-import { ClientProxy } from '@nestjs/microservices';
 import { lastValueFrom, timeout } from 'rxjs';
-import { WebhookEvent, WebhookPattern } from '../events';
+import {
+  EventDataMap,
+  MerkalyEvent,
+  MerkalyEventMeta,
+  MerkalyEventType,
+  createMerkalyEvent,
+} from '../events';
 import { LoggerService } from '../logger';
 import {
   BrokerStatus,
   DEFAULT_PUBLISH_TIMEOUT,
-  RABBIT_CLIENT_FACTORY,
+  MERKALY_EXCHANGE,
+  RABBIT_CLIENT,
   RABBIT_OPTIONS,
-  RabbitClientFactory,
+  RabbitClient,
   RabbitModuleOptions,
 } from './rabbit.options';
 
-const describe = (error: any): string =>
+export const describeError = (error: any): string =>
   error?.message ??
   error?.err?.message ??
   (typeof error === 'string' ? error : JSON.stringify(error));
 
+const GROUP = 'EventsPublisher';
+
 @Injectable()
 export class EventsPublisher implements OnApplicationBootstrap, OnApplicationShutdown {
-  private readonly clients = new Map<string, ClientProxy>();
   private readonly logger: LoggerService;
   private brokerStatus: BrokerStatus;
 
   constructor(
     @Inject(RABBIT_OPTIONS) private readonly options: RabbitModuleOptions,
-    @Inject(RABBIT_CLIENT_FACTORY) private readonly factory: RabbitClientFactory | null,
+    @Inject(RABBIT_CLIENT) private readonly client: RabbitClient | null,
     @Optional() logger?: LoggerService,
   ) {
     this.logger = logger ?? new LoggerService();
-    this.brokerStatus = factory ? 'connecting' : 'disabled';
+    this.brokerStatus = client ? 'connecting' : 'disabled';
   }
 
   public get status() {
     return this.brokerStatus;
   }
 
+  private get exchange() {
+    return this.options.exchange ?? MERKALY_EXCHANGE;
+  }
+
   public onApplicationBootstrap() {
-    if (!this.factory) {
+    if (!this.client) {
       return this.logger.warn({
-        group: EventsPublisher.name,
-        message: 'RabbitMQ url is not set: publishing disabled, every publish will fail',
-        type: 'event',
+        group: GROUP,
+        message: 'RabbitMQ url is not set: publishing disabled, every emit will fail',
       });
     }
 
-    const client = this.client(this.options.queue);
-
-    client.status?.subscribe((status) => {
+    this.client.status?.subscribe((status) => {
       this.brokerStatus = status === 'connected' ? 'connected' : 'disconnected';
     });
 
-    return client.connect().catch((error) => {
+    return this.client.connect().catch((error) => {
       this.brokerStatus = 'disconnected';
-      this.logger.error({
-        group: EventsPublisher.name,
-        message: `Broker unreachable: ${describe(error)}`,
-        type: 'event',
-      });
+      this.logger.error({ group: GROUP, message: `Broker unreachable: ${describeError(error)}` });
     });
   }
 
   public onApplicationShutdown() {
-    return Promise.all([...this.clients.values()].map((client) => client.close()));
+    return this.client?.close();
   }
 
-  public publish<T>(
-    pattern: WebhookPattern | (string & {}),
-    event: WebhookEvent<T>,
-  ): Promise<void> {
-    if (!this.factory) {
+  // Resolves with the event once the broker took it; ServiceUnavailableException otherwise
+  public emit<K extends MerkalyEventType>(
+    type: K,
+    data: EventDataMap[K],
+    meta?: MerkalyEventMeta,
+  ): Promise<MerkalyEvent<K>> {
+    if (!this.client) {
       return Promise.reject(new ServiceUnavailableException('Event broker is not configured'));
     }
 
-    const queue = this.options.routes?.[pattern] ?? this.options.queue;
+    const event = createMerkalyEvent(this.options.producer, type, data, meta);
     const ms = this.options.timeout ?? DEFAULT_PUBLISH_TIMEOUT;
-    const emitted$ = this.client(queue).emit(pattern, event).pipe(timeout(ms));
-    const log = { group: EventsPublisher.name, type: 'event' };
+    const line = `${type} (${event.id}) -> ${this.exchange}`;
 
-    return lastValueFrom(emitted$, { defaultValue: undefined })
-      .then(() => this.logger.log({ ...log, message: `${pattern} (${event.id}) -> ${queue}` }))
+    return lastValueFrom(this.client.emit(type, event).pipe(timeout(ms)), {
+      defaultValue: undefined,
+    })
+      .then(() => {
+        this.logger.log({ group: GROUP, message: line });
+
+        return event;
+      })
       .catch((error) => {
-        this.logger.error({
-          ...log,
-          message: `${pattern} (${event.id}) -> ${queue} failed: ${describe(error)}`,
-        });
+        this.logger.error({ group: GROUP, message: `${line} failed: ${describeError(error)}` });
 
-        throw new ServiceUnavailableException(`Could not publish ${pattern}`); // caller decides retry
+        throw new ServiceUnavailableException(`Could not publish ${type}`); // caller decides retry
       });
-  }
-
-  private client(queue: string): ClientProxy {
-    if (!this.clients.has(queue)) this.clients.set(queue, this.factory!(queue));
-
-    return this.clients.get(queue)!;
   }
 }
