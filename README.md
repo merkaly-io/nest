@@ -39,7 +39,8 @@ strict-peer-dependencies=false
 import {
   env, loadEnv, // config
   LoggerModule, LoggerService, // logger
-  ExceptionsFilter, // filtro HTTP JSON global
+  requestLogger, requestOrigin, bodyParsers, bodyParserReason, // uma linha por request
+  AbstractExceptionFilter, ExceptionsFilter, rememberError, // filtros (motivo do erro para o log)
   RabbitModule, EventsPublisher, rabbitConsumerOptions, OnRabbitEvent, ackMessage, nackMessage,
   WebhookEvent, WebhookPatterns, WebhookPattern, AliexpressOrderStatus, createWebhookEvent, toPattern,
   SignatureGuard, safeCompare, hmacDigest, verifyHmac,
@@ -51,7 +52,7 @@ import {
 ```ts
 @Module({
   imports: [
-    LoggerModule.forRoot(), // global; opcional: { host: () => cls.get('host') }
+    LoggerModule.forRoot({ service: 'webhooks.merkaly.io' }), // global
     RabbitModule.forRoot({
       url: env.string('RABBITMQ_URL'), // sem url: publish rejeita com 503
       queue: env.string('RABBITMQ_QUEUE', 'api.merkaly.io-queue'), // <repo>-queue
@@ -70,6 +71,42 @@ export class AppModule {}
 **Filas**: o nome é o do repositório do serviço que consome, `<repo>-queue` (ex.: `api.merkaly.io-queue`, `payments.merkaly.io-queue`). O pacote não tem fila padrão: cada app passa a sua.
 
 **Health check**: o pacote não registra controllers. O Swagger servido em `/` responde 200 e funciona como health check.
+
+### Logger e requests
+
+Uma linha por request, impressa ao terminar a resposta (inclui Swagger e rotas desconhecidas):
+
+```
+10:21:07 412 LOG     [garagemtuning.store.merkaly.test] GET /store/products 200 34ms
+10:21:08 027 WARN    [203.0.113.7] GET /wp-login.php 404 1ms "Cannot GET /wp-login.php"
+10:21:09 551 ERROR   [admin.merkaly.io] POST /admin/orders 500 12ms "boom"
+Error: boom
+    at ...
+```
+
+- Nível: `ERROR` em 5xx (com o stack embaixo), `WARN` em 4xx, `LOG` no resto.
+- Origem padrão (`requestOrigin`): `x-merkaly-host`, senão o host do `Origin`, senão `cf-connecting-ip`, senão o primeiro `x-forwarded-for`, senão o socket.
+- Nunca loga body, headers, tokens nem query. O motivo é cortado em 200 caracteres.
+- Logs internos (`logger.log({ group, message })`) mostram uma coluna de label: `context()` dentro de um request, senão `service`.
+
+```ts
+// main.ts
+app.use(requestLogger(app)); // antes do Swagger; opcional { label: (req) => 'grupo' }
+bodyParsers(app, { raw: ['/webhook/stripe'] }); // json + urlencoded com motivo seguro ("Invalid JSON body")
+SwaggerModule.setup('/', app, document);
+```
+
+- `bodyParsers(app, { raw?, rawBody? })`: `raw` mantém o body como Buffer nesses paths; `rawBody: true` preenche `req.rawBody` (igual ao `NestFactory.create(..., { rawBody: true })`, que deixa de registrar os próprios parsers).
+- Contexto por request (ex.: host do tenant via CLS), sem o pacote depender de `nestjs-cls`:
+
+```ts
+LoggerModule.forRootAsync({
+  inject: [ClsService],
+  useFactory: (cls: ClsService) => ({ service: 'api.merkaly.io', context: () => cls.get('host') }),
+});
+```
+
+**Filtros**: o filtro não loga; guarda o motivo (e o stack de 5xx) em `response.locals` e o `requestLogger` imprime. `ExceptionsFilter` responde `{ statusCode, message, path, timestamp }`. Para filtros próprios, estender `AbstractExceptionFilter` (resposta padrão do Nest, sem o log duplicado do `ExceptionsHandler`) e usar `this.remember(response, motivo, trace?)` quando responder por conta própria.
 
 ### Eventos
 

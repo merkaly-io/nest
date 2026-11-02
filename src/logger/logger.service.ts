@@ -14,9 +14,7 @@ const levelColors: Partial<Record<LogLevel, Chalk.Chalk>> = {
 
 @Injectable()
 export class LoggerService {
-  constructor(
-    @Optional() @Inject(LOGGER_OPTIONS) private readonly options: LoggerModuleOptions = {},
-  ) {}
+  constructor(@Optional() @Inject(LOGGER_OPTIONS) private readonly options?: LoggerModuleOptions) {}
 
   public log(options: LoggingOptions) {
     this.print('log', options);
@@ -24,8 +22,7 @@ export class LoggerService {
 
   public error(options: LoggingOptions & { trace?: unknown }) {
     this.print('error', options);
-
-    if (options.trace) console.error(chalk.gray(options.trace));
+    this.trace(options.trace);
   }
 
   public warn(options: LoggingOptions) {
@@ -40,27 +37,39 @@ export class LoggerService {
     this.print('verbose', options);
   }
 
-  private print(tier: LogLevel, { group, message, type }: LoggingOptions) {
+  // One line per request: `[origin] METHOD /path STATUS 12ms "reason"`, no label column
+  public request(tier: LogLevel, origin: string, message: string, trace?: unknown) {
+    this.print(tier, { group: origin, message }, null);
+    this.trace(trace);
+  }
+
+  private trace(trace?: unknown) {
+    if (trace) console.error(chalk.gray(trace instanceof Error ? trace.stack : trace));
+  }
+
+  private print(
+    tier: LogLevel,
+    { group, message }: LoggingOptions,
+    label: string | null = this.label,
+  ) {
     const color = levelColors[tier] ?? ((txt: string) => txt);
     const timestamps = this.options?.timestamps ?? process.env.NODE_ENV !== 'production';
-    const host = this.options?.host?.();
     const output: string[] = [];
 
     if (timestamps) output.push(this.currentTime());
 
-    output.push(color(tier.toUpperCase().padEnd(7)));
-
-    if (host) output.push(chalk.hex('#00FF77')(host));
-
-    output.push(chalk.hex('#FFA500')(group ? `[${group}]` : ''), message);
-
-    return console.log(
-      output
-        .join(' ')
-        .padEnd(200)
-        .concat(chalk.hex('#FFA500')(`[${type}]`))
-        .trim(),
+    output.push(
+      color(tier.toUpperCase().padEnd(7)),
+      label ? chalk.hex('#00FF77')(label) : '',
+      chalk.hex('#FFA500')(group ? `[${group}]` : ''),
+      message,
     );
+
+    return console.log(output.filter(Boolean).join(' '));
+  }
+
+  private get label(): string | null {
+    return this.options?.context?.() ?? this.options?.service ?? null; // request context, else the service
   }
 
   private currentTime() {
