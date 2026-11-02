@@ -74,22 +74,22 @@ export class AppModule {}
 
 ### Logger e requests
 
-Todas as linhas têm as mesmas colunas, com largura fixa (`-` quando falta o valor, `…` quando passa da largura), e a mensagem começa sempre na mesma posição:
+LEVEL, ORIGIN e SCOPE têm largura fixa (`-` quando falta o valor, `…` quando passa da largura), então a descrição (`KIND:: MESSAGE`) começa sempre na mesma posição:
 
 ```
-             LEVEL   ORIGIN                   SCOPE                  KIND             MESSAGE
-08:02:05 657 DEBUG   api.merkaly.io           -                      MongoService     connected
-08:02:08 410 LOG     admin.merkaly.io         org_6sflVH0jykwUzj8z   OrderService     order created
-08:02:08 410 LOG     admin.merkaly.io         org_6sflVH0jykwUzj8z   POST             /admin/orders 201 15ms
-08:02:08 423 WARN    203.0.113.7              -                      GET              /wp-login.php 404 2ms "Cannot GET /wp-login.php"
-08:02:08 439 ERROR   admin.merkaly.io         org_6sflVH0jykwUzj8z   GET              /admin/boom 500 0ms "boom"
+             LEVEL   ORIGIN                   SCOPE                  KIND:: MESSAGE
+08:02:05 657 DEBUG   api.merkaly.io           -                      MongoService:: connected
+08:02:08 410 LOG     admin.merkaly.io         org_6sflVH0jykwUzj8z   OrderSaleRepository:: order created
+08:02:08 410 LOG     admin.merkaly.io         org_6sflVH0jykwUzj8z   POST:: /admin/orders 201 15ms
+08:02:08 423 WARN    203.0.113.7              -                      GET:: /wp-login.php 404 2ms "Cannot GET /wp-login.php"
+08:02:08 439 ERROR   admin.merkaly.io         org_6sflVH0jykwUzj8z   GET:: /admin/boom 500 0ms "boom"
 Error: boom
     at ...
 ```
 
 - **ORIGIN** (24): quem fez o request, nas linhas de request e nos logs internos emitidos durante ele: `x-merkaly-host`, senão o host do `Origin`, `cf-connecting-ip`, o primeiro `x-forwarded-for` ou o socket (`requestOrigin`). Fora de um request, o `service`.
 - **SCOPE** (22): contexto de negócio definido pelo app (`requestLogger({ scope })` ou `LoggerModule({ scope })`, ex.: id da organização). Nas linhas de request é resolvido ao terminar a resposta, então pega o que os guards definiram.
-- **KIND** (16): método HTTP nas linhas de request; nos logs internos, o `group` de quem loga. Com `requestLogger({ kind })` a linha de request usa esse valor (ex.: o evento do webhook) e o método passa a abrir a mensagem: `PAYMENT_RECEIVED POST /asaas 200 44ms`.
+- **KIND::** abre a descrição, sem largura fixa (nunca é cortado): método HTTP nas linhas de request; nos logs internos, o `group` de quem loga. Com `requestLogger({ kind })` a linha de request usa esse valor (ex.: o evento do webhook) e o método passa para a descrição: `PAYMENT_RECEIVED:: POST /asaas 200 44ms`.
 - **MESSAGE**: `/path STATUS Nms "motivo"` (motivo cortado em 200, sem query, body nem headers) ou o texto. Nível: `ERROR` em 5xx com o stack embaixo, `WARN` em 4xx, `LOG` no resto.
 
 ```ts
