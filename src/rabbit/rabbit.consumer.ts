@@ -54,4 +54,5 @@ export async function assertConsumerTopology(options: RabbitConsumerOptions) {
   await connection.close();
 }
 
-export const OnMerkalyEvent = (type: MerkalyEventType) => EventPattern(type, Transport.RMQ);
+// One handler can take several types (stacked @EventPattern would overwrite each other)
+export const OnMerkalyEvent = (...types: MerkalyEventType[]) => EventPattern(types, Transport.RMQ);

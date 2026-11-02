@@ -148,7 +148,7 @@ received(@Payload() event: MerkalyEvent<MerkalyEventType.PAYMENT_RECEIVED>, @Ctx
 }
 ```
 
-`EventsConsumer.handle` fecha a mensagem e loga uma linha (`ORIGIN` = provedor, `SCOPE` = organização, `KIND` = `EVENT`):
+`@OnMerkalyEvent(...types)` aceita vários tipos no mesmo handler. `EventsConsumer.handle` fecha a mensagem e loga uma linha (`ORIGIN` = provedor, `SCOPE` = organização, `KIND` = `EVENT`):
 
 | Resultado | O que acontece |
 | --- | --- |
