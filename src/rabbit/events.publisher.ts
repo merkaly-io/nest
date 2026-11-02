@@ -14,7 +14,7 @@ import {
   MerkalyEventType,
   createMerkalyEvent,
 } from '../events';
-import { LoggerService } from '../logger';
+import { LoggerService, noteRequest } from '../logger';
 import {
   BrokerStatus,
   DEFAULT_PUBLISH_TIMEOUT,
@@ -94,7 +94,7 @@ export class EventsPublisher implements OnApplicationBootstrap, OnApplicationShu
       defaultValue: undefined,
     })
       .then(() => {
-        this.logger.log({ group: GROUP, message: line });
+        if (!noteRequest(`-> ${type}`)) this.logger.log({ group: GROUP, message: line }); // own line outside a request
 
         return event;
       })

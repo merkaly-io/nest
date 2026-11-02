@@ -2,12 +2,31 @@ import { AsyncLocalStorage } from 'async_hooks';
 import { Injectable, NestMiddleware } from '@nestjs/common';
 import type { NextFunction, Request, Response } from 'express';
 
+export type RequestNoteLevel = 'log' | 'warn' | 'error';
+
+export interface RequestNote {
+  text: string;
+  level: RequestNoteLevel; // raises the request line level, never lowers it
+}
+
 export interface RequestContext {
   origin: string; // ORIGIN column of every line logged during the request
   scope?: () => string | undefined; // from requestLogger({ scope })
+  notes?: RequestNote[]; // appended to the request line instead of separate lines
 }
 
 export const requestContext = new AsyncLocalStorage<RequestContext>();
+
+// Adds an outcome to the request line (`-> payment.received`); false outside a request
+export function noteRequest(text: string, level: RequestNoteLevel = 'log') {
+  const context = requestContext.getStore();
+
+  if (!context) return false;
+
+  (context.notes ??= []).push({ level, text });
+
+  return true;
+}
 
 const CONTEXT = Symbol('merkaly.request.context');
 
