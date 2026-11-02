@@ -1,12 +1,10 @@
 # Contrato de eventos entre servicios
 
-Estado: **propuesta aprobada por el Founder, pendiente de implementar**. Este cambio es solo
-documentación.
+Estado: **aprobado por el Founder; tipos de pagos y subconta implementados en `@merkaly/nest` 0.2.0** (exchange decidido el 2026-11-02). El resto del catálogo entra por proveedor.
 
-Hoy `webhooks.merkaly.io` publica en `api.merkaly.io-queue` el evento crudo de cada proveedor
-(`asaas.payment_received`, `stripe.invoice.paid`, `auth0.success_login`,
-`aliexpress.dropshipper_order_status_update`) con el sobre `WebhookEvent`. Los nombres se
-improvisaron y el api todavía no consume: es el momento de fijar el contrato.
+Antes, `webhooks.merkaly.io` publicaba en `api.merkaly.io-queue` el evento crudo de cada proveedor
+(`asaas.payment_received`, `stripe.invoice.paid`...) con el sobre `WebhookEvent`, que en 0.2.0 se
+quitó. Ahora publica eventos normalizados en el exchange `merkaly.events`.
 
 Principios:
 
@@ -19,7 +17,7 @@ Principios:
 ## 1. Por qué el contrato vive en `@merkaly/nest`
 
 `@merkaly/nest` ya es la dependencia común de los backends (api, webhooks, payments) y ya exporta
-`RabbitModule`, `EventsPublisher`, `WebhookEvent` y `WebhookPatterns`. Productor y consumidor
+`RabbitModule`, `EventsPublisher` y `EventsConsumer`. Productor y consumidor
 importan el mismo tipo y el mismo enum: si el productor cambia un campo, el build del consumidor se
 rompe en vez de fallar en producción.
 
@@ -110,7 +108,7 @@ export type MerkalyEventSource = 'asaas' | 'stripe' | 'auth0' | 'aliexpress';
 publisher.emit(MerkalyEventType.PAYMENT_CONFIRMED, { ...ref, confirmedAt }, { organization, source: 'asaas', raw });
 
 // consumidor
-@OnRabbitEvent(MerkalyEventType.PAYMENT_CONFIRMED)
+@OnMerkalyEvent(MerkalyEventType.PAYMENT_CONFIRMED)
 handle(event: MerkalyEvent<MerkalyEventType.PAYMENT_CONFIRMED>) {
   event.data.paymentId; // string, tipado
 }
@@ -141,7 +139,7 @@ Saneado de `raw` (lista cerrada por proveedor, en el productor):
 
 ## 4. Catálogo
 
-Productor de todos: `webhooks.merkaly.io`. Cola de destino hoy: `api.merkaly.io-queue`. "Org":
+Productor de todos: `webhooks.merkaly.io`, al exchange `merkaly.events`. Consumidor hoy: cola `api.merkaly.io`. "Org":
 **sí** = obligatoria (sin ella se responde 200 al proveedor, se loguea error y no se publica),
 **no** = el productor no la conoce.
 
@@ -158,9 +156,9 @@ interface PaymentRef {
 }
 ```
 
-### Pagos del store (Asaas, `/asaas/:organization`)
+### Pagos del store (Asaas, `/asaas`)
 
-La organización sale de la url. Con `paymentId` el api lee el pago en Asaas y aplica
+Un solo webhook en la cuenta principal (split 100%): la organización sale del `externalReference` (`<orgId>:<saleId>`). Con `paymentId` el api lee el pago en Asaas y aplica
 `OrderSalePaymentService.apply()` (el mismo del polling), que confirma vía
 `OrderSaleService.confirmPayment` solo si el monto es exacto y la venta sigue `OPEN`. El evento es
 un **disparador**, no la fuente de verdad.
@@ -261,13 +259,13 @@ Se responde 200 al proveedor, se **descarta con log en debug** y no se publica (
 
 | Regla | Detalle |
 | --- | --- |
-| Patrón | `type` es el patrón de Nest RMQ (`{ pattern, data }`) y la routing key. El consumidor usa `@OnRabbitEvent(MerkalyEventType.PAYMENT_CONFIRMED)`. |
-| Una cola directa por consumidor | `<repo>-queue`: hoy `api.merkaly.io-queue`; después `payments.merkaly.io-queue`. El productor elige la cola con `routes` (`type -> cola`, por defecto `api.merkaly.io-queue`). Sin exchange por ahora. |
-| Qué es un exchange | Un "repartidor" de RabbitMQ que recibe el mensaje y lo copia a todas las colas interesadas según la routing key; hace falta cuando un mismo evento tenga dos o más consumidores (sería `merkaly.events`, topic, con bindings como `payment.#`). |
-| Dead letter | `api.merkaly.io-queue.dlq`, vía `x-dead-letter-exchange`. |
-| Cola sin consumidor | **Policy** de RabbitMQ sobre `api.merkaly.io-queue`: `message-ttl` 7 días, `max-length` 10.000, `overflow: drop-head`, dead letter a la `.dlq`. Policy y no argumentos de `queueOptions`: los argumentos son inmutables y si productor y consumidor declaran la cola distinto RabbitMQ responde `PRECONDITION_FAILED`. |
+| Patrón | `type` es el patrón de Nest RMQ (`{ pattern, data }`) y la routing key. El consumidor usa `@OnMerkalyEvent(MerkalyEventType.PAYMENT_CONFIRMED)`. |
+| Exchange | `merkaly.events`, topic. El productor publica ahí con `type` como routing key y **nunca nombra una cola**. Decidido el 2026-11-02: con cola directa el productor quedaba acoplado al consumidor. |
+| Cola por consumidor | Con el nombre del repo que consume (`api.merkaly.io`, después `payments.merkaly.io`). La declara el consumidor y Nest la liga a cada tipo con handler; un consumidor nuevo no toca al productor. Sin consumidor ligado, el exchange descarta el mensaje: el consumidor tiene que haber arrancado al menos una vez. |
+| Dead letter | `<cola>.dlq`, vía `x-dead-letter-exchange` de la cola principal. |
+| Cola sin consumir | Argumentos de la cola principal: `x-message-ttl` 7 días, `x-max-length` 10.000, `x-overflow: drop-head`, dead letter a la `.dlq`. Solo el consumidor declara la cola, así que no hay choque de argumentos; cambiarlos exige borrar la cola. |
 | Reintento del productor | `publish` espera el ack del broker; si falla, el webhook responde 503 y el proveedor reintenta (Asaas pausa la cola de webhooks tras fallos seguidos, hay que vigilarlo). |
-| Reintento del consumidor | Éxito: `ackMessage`. Error transitorio (red, Mongo, Asaas caído): `nackMessage(requeue = false)` a `<repo>-queue.retry` con TTL 30 s que devuelve a la principal; tras 5 intentos (cabecera `x-death`) queda en la `.dlq`. Rechazo de negocio (venta inexistente, monto distinto, venta cerrada): `ack` y log de error visible, sin reintento. |
+| Reintento del consumidor | `EventsConsumer.handle`. Éxito: `ack`. Error transitorio (red, Mongo, Asaas caído): copia a `<cola>.retry` (TTL 30 s, vuelve a la principal) y `ack`; tras 5 intentos (cabecera `x-merkaly-retries`) va a la `.dlq`. Rechazo de negocio (`EventRejectedException`: venta inexistente, monto distinto, venta cerrada): `ack` y log visible, sin reintento. |
 | Idempotencia | El consumidor deduplica por `id`. v1 sin persistencia: cada handler es idempotente por diseño (`confirmPayment` ya tolera el `ConflictException` concurrente; `sync()` es lectura). Después: colección de eventos procesados con índice único en `id` y TTL de 30 días. |
 | Orden | No garantizado (`received` puede llegar antes que `confirmed`). Los handlers releen el estado real en el proveedor y usan `occurredAt` para descartar fotos viejas (`subscription.updated`). |
 
@@ -295,12 +293,12 @@ pierde).
 
 | Paso | Repo | Release | Qué |
 | --- | --- | --- | --- |
-| 1 | nest | patch | `MerkalyEvent<K>`, `MerkalyEventType`, `EventDataMap`, `MerkalyProducer`, interfaces de `data` en `src/events/`, y `EventsPublisher.emit(type, data, meta)` tipado que enruta por `type`. `WebhookEvent`, `WebhookPatterns`, `toPattern`, `createWebhookEvent` quedan `@deprecated`, sin quitar. |
-| 2 | webhooks | patch | Mappers por proveedor al tipo normalizado, `raw` saneado, `emit`. Lo no traducido se descarta con log en debug. Asaas pasa `value` en reais a centavos. Nadie consume: corte directo, sin doble publicación. |
-| 3 | infra | n/a | Vaciar `api.merkaly.io-queue` (tiene mensajes crudos viejos) y aplicar la policy de TTL, `max-length` y dead letter. |
-| 4 | nest | minor | Quitar `WebhookEvent`, `WebhookPatterns`, `toPattern`, `createWebhookEvent` cuando webhooks ya no los use. |
-| 5 | api | fuera de alcance | Consumidor (`rabbitConsumerOptions`, handlers por tipo), `aliexpressSellerId` en la metadata de la organización e índice `sellerId -> organización`. Recién ahí: quitar el polling Pix del store y mover el webhook de Stripe del api. |
-| 6 | payments | fuera de alcance | Con `payments.merkaly.io`, `routes` manda `payment.*` a su cola; payments publica su resultado al api con `producer: payments.merkaly.io`. |
+| 1 | nest | minor (0.2.0) | `MerkalyEvent<K>`, `MerkalyEventType`, `EventDataMap` (pagos y subconta), `MerkalyProducer`, `EventsPublisher.emit` al exchange, `EventsConsumer` (ack, `.retry`, `.dlq`, `around` para el contexto del app). Se quitan `WebhookEvent`, `WebhookPatterns`, `toPattern` y `createWebhookEvent` (nadie los importaba: webhooks tenía su copia). |
+| 2 | webhooks | patch | Asaas traducido a `payment.*` con `emit`, `raw` saneado, `value` de reais a centavos. Stripe, Auth0 y AliExpress: se descartan con log hasta tener su traducción (nadie los consume; Stripe y Auth0 siguen llegando directo al api). |
+| 3 | infra | n/a | Borrar la cola vieja `api.merkaly.io-queue` (mensajes crudos sin consumidor). La cola nueva la crea el api al arrancar. |
+| 4 | api | patch | Consumidor de `payment.*` y `payment.account.*` en la cola `api.merkaly.io`. El endpoint del store pasa a leer solo Mongo; se quita el polling contra Asaas apenas funcione. |
+| 5 | nest + webhooks + api | patch | Resto del catálogo por proveedor: AliExpress (`supplier.*`, con `aliexpressSellerId` e índice), Stripe (`subscription.*`, mover el webhook del api), Auth0 (`identity.*`). |
+| 6 | payments | fuera de alcance | `payments.merkaly.io` declara su cola ligada a lo que necesite; publica su resultado con `producer: payments.merkaly.io`. |
 
 ## 8. Decisiones
 
@@ -314,5 +312,5 @@ pierde).
 | Auth0 login fallido y bloqueo | Fuera del catálogo por ahora. |
 | Stripe sin `AUTH0_ORG_ID` | 200, log de error, no se publica. |
 | Tipado | `data: EventDataMap[K]`, `emit(type, data)` y handlers tipados; `raw` opcional en todos, `unknown`, 16 KB, saneado, nunca leído por consumidores. |
-| Routing | Cola directa por consumidor; exchange cuando un evento tenga varios consumidores. |
+| Routing | Exchange topic `merkaly.events` desde ya (2026-11-02); cola por consumidor con el nombre de su repo. |
 | Cola sin consumir | 7 días / 10.000 mensajes. |
