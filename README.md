@@ -39,7 +39,8 @@ strict-peer-dependencies=false
 import {
   env, loadEnv, // config
   LoggerModule, LoggerService, // logger
-  ExceptionsFilter, // filtro HTTP JSON global
+  requestLogger, requestOrigin, requestContext, bodyParsers, bodyParserReason, // uma linha por request
+  AbstractExceptionFilter, ExceptionsFilter, rememberError, // filtros (motivo do erro para o log)
   RabbitModule, EventsPublisher, rabbitConsumerOptions, OnRabbitEvent, ackMessage, nackMessage,
   WebhookEvent, WebhookPatterns, WebhookPattern, AliexpressOrderStatus, createWebhookEvent, toPattern,
   SignatureGuard, safeCompare, hmacDigest, verifyHmac,
@@ -51,7 +52,7 @@ import {
 ```ts
 @Module({
   imports: [
-    LoggerModule.forRoot(), // global; opcional: { host: () => cls.get('host') }
+    LoggerModule.forRoot({ service: 'webhooks.merkaly.io' }), // global
     RabbitModule.forRoot({
       url: env.string('RABBITMQ_URL'), // sem url: publish rejeita com 503
       queue: env.string('RABBITMQ_QUEUE', 'api.merkaly.io-queue'), // <repo>-queue
@@ -70,6 +71,46 @@ export class AppModule {}
 **Filas**: o nome é o do repositório do serviço que consome, `<repo>-queue` (ex.: `api.merkaly.io-queue`, `payments.merkaly.io-queue`). O pacote não tem fila padrão: cada app passa a sua.
 
 **Health check**: o pacote não registra controllers. O Swagger servido em `/` responde 200 e funciona como health check.
+
+### Logger e requests
+
+Todas as linhas têm as mesmas colunas, com largura fixa (`-` quando falta o valor, `…` quando passa da largura), e a mensagem começa sempre na mesma posição:
+
+```
+             LEVEL   ORIGIN                   SCOPE                  KIND             MESSAGE
+08:02:05 657 DEBUG   api.merkaly.io           -                      MongoService     connected
+08:02:08 410 LOG     admin.merkaly.io         org_6sflVH0jykwUzj8z   OrderService     order created
+08:02:08 410 LOG     admin.merkaly.io         org_6sflVH0jykwUzj8z   POST             /admin/orders 201 15ms
+08:02:08 423 WARN    203.0.113.7              -                      GET              /wp-login.php 404 2ms "Cannot GET /wp-login.php"
+08:02:08 439 ERROR   admin.merkaly.io         org_6sflVH0jykwUzj8z   GET              /admin/boom 500 0ms "boom"
+Error: boom
+    at ...
+```
+
+- **ORIGIN** (24): quem fez o request, nas linhas de request e nos logs internos emitidos durante ele: `x-merkaly-host`, senão o host do `Origin`, `cf-connecting-ip`, o primeiro `x-forwarded-for` ou o socket (`requestOrigin`). Fora de um request, o `service`.
+- **SCOPE** (22): contexto de negócio definido pelo app (`requestLogger({ scope })` ou `LoggerModule({ scope })`, ex.: id da organização). Nas linhas de request é resolvido ao terminar a resposta, então pega o que os guards definiram.
+- **KIND** (16): método HTTP nas linhas de request; nos logs internos, o `group` de quem loga.
+- **MESSAGE**: `/path STATUS Nms "motivo"` (motivo cortado em 200, sem query, body nem headers) ou o texto. Nível: `ERROR` em 5xx com o stack embaixo, `WARN` em 4xx, `LOG` no resto.
+
+```ts
+// main.ts
+app.use(requestLogger(app)); // antes do Swagger; opcional { scope: (req) => 'stripe' }
+bodyParsers(app, { raw: ['/webhook/stripe'] }); // json + urlencoded com motivo seguro ("Invalid JSON body")
+SwaggerModule.setup('/', app, document);
+```
+
+- O ORIGIN do request fica num `AsyncLocalStorage` do pacote (`requestContext`). O `requestLogger` cria o contexto e o `LoggerModule` registra um middleware que volta a entrar nele depois dos body parsers (que podem perder o contexto assíncrono), igual ao `nestjs-cls`.
+- `bodyParsers(app, { raw?, rawBody? })`: `raw` mantém o body como Buffer nesses paths; `rawBody: true` preenche `req.rawBody` (igual ao `NestFactory.create(..., { rawBody: true })`, que deixa de registrar os próprios parsers).
+- SCOPE com CLS, sem o pacote depender de `nestjs-cls`:
+
+```ts
+LoggerModule.forRootAsync({
+  inject: [ClsService],
+  useFactory: (cls: ClsService) => ({ service: 'api.merkaly.io', scope: () => cls.get('identity') }),
+});
+```
+
+**Filtros**: o filtro não loga; guarda o motivo (e o stack de 5xx) em `response.locals` e o `requestLogger` imprime. `ExceptionsFilter` responde `{ statusCode, message, path, timestamp }`. Para filtros próprios, estender `AbstractExceptionFilter` (resposta padrão do Nest, sem o log duplicado do `ExceptionsHandler`) e usar `this.remember(response, motivo, trace?)` quando responder por conta própria.
 
 ### Eventos
 

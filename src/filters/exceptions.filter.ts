@@ -3,45 +3,29 @@ import {
   Catch,
   ExceptionFilter,
   HttpException,
-  HttpStatus,
-  Optional,
+  IntrinsicException,
 } from '@nestjs/common';
-import { LoggerService } from '../logger';
+import { exceptionReason, exceptionStatus, rememberError } from './abstract.filter';
+import type { Request, Response } from 'express';
 
-interface HttpRequest {
-  method: string;
-  url: string;
-}
-
-interface HttpResponse {
-  status(code: number): { json(body: unknown): unknown };
-}
-
+// Ready-made global filter with a JSON body ({ statusCode, message, path, timestamp }); requestLogger prints the reason
 @Catch()
 export class ExceptionsFilter implements ExceptionFilter {
-  private readonly logger: LoggerService;
-
-  constructor(@Optional() logger?: LoggerService) {
-    this.logger = logger ?? new LoggerService();
-  }
-
   catch(exception: unknown, host: ArgumentsHost) {
     if (host.getType() !== 'http') throw exception; // rpc/ws keep Nest defaults
 
     const http = host.switchToHttp();
-    const request = http.getRequest<HttpRequest>();
-    const response = http.getResponse<HttpResponse>();
+    const request = http.getRequest<Request>();
+    const response = http.getResponse<Response>();
 
+    const statusCode = exceptionStatus(exception);
     const isHttp = exception instanceof HttpException;
-    const statusCode = isHttp ? exception.getStatus() : HttpStatus.INTERNAL_SERVER_ERROR;
     const body = isHttp ? exception.getResponse() : 'Internal server error';
     const message = typeof body === 'string' ? body : (body as { message?: unknown }).message;
+    const trace =
+      statusCode >= 500 && !(exception instanceof IntrinsicException) ? exception : undefined;
 
-    const log = { group: ExceptionsFilter.name, type: 'filter' };
-    const summary = `${request.method} ${request.url} -> ${statusCode}`;
-
-    if (statusCode >= 500) this.logger.error({ ...log, message: summary, trace: exception });
-    else this.logger.warn({ ...log, message: `${summary} ${JSON.stringify(message)}` });
+    rememberError(response, exceptionReason(exception), trace);
 
     response.status(statusCode).json({
       statusCode,
