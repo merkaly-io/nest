@@ -1,6 +1,6 @@
 {
   "name": "@merkaly/nest",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Shared NestJS runtime and tooling for Merkaly backend apps: pinned versions plus RabbitMQ events, logger, filters, config and signatures",
   "repository": {
     "type": "git",
