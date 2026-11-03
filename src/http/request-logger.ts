@@ -1,5 +1,5 @@
 import { contextOf, LoggerService, requestContext, RequestNoteLevel } from '../logger';
-import type { INestApplicationContext } from '@nestjs/common';
+import type { INestApplicationContext, LogLevel } from '@nestjs/common';
 import type { NextFunction, Request, RequestHandler, Response } from 'express';
 
 export interface RequestLogLocals {
@@ -51,7 +51,10 @@ export function requestLogger(
         .join(' ');
       const status: RequestNoteLevel =
         response.statusCode >= 500 ? 'error' : response.statusCode >= 400 ? 'warn' : 'log';
-      const tier = notes.reduce((level, note) => higher(level, note.level), status);
+      const noise = response.statusCode === 404 && !request.route && !notes.length; // no route matched: scanners and bots
+      const tier: LogLevel = noise
+        ? 'debug'
+        : notes.reduce((level, note) => higher(level, note.level), status);
 
       // scope resolved now: guards may set the organization late in the request
       requestContext.run(context, () =>
