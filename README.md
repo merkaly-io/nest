@@ -40,6 +40,7 @@ import {
   env, loadEnv, // config
   LoggerModule, LoggerService, // logger
   requestLogger, requestOrigin, requestContext, noteRequest, bodyParsers, bodyParserReason, // uma linha por request
+  noIndex, // X-Robots-Tag noindex + /robots.txt bloqueando buscadores
   AbstractExceptionFilter, ExceptionsFilter, rememberError, // filtros (motivo do erro para o log)
   RabbitModule, EventsPublisher, EventsConsumer, EventRejectedException, // eventos
   rabbitConsumerOptions, assertConsumerTopology, OnMerkalyEvent,
