@@ -61,6 +61,7 @@ export enum MerkalyEventType {
   SUBSCRIPTION_CANCELLED = 'subscription.cancelled',
   IDENTITY_USER_SIGNED_UP = 'identity.user.signed_up',
   IDENTITY_USER_DELETED = 'identity.user.deleted',
+  IDENTITY_SIGNUP_REQUESTED = 'identity.signup.requested',
 }
 ```
 
@@ -233,6 +234,7 @@ La organización sale de `metadata.AUTH0_ORG_ID` (la escribe el api en customer 
 | --- | --- | --- | --- | --- |
 | `identity.user.signed_up` | no | `{ userId: string; email: string \| null; connection: string \| null }` | log `ss` | Nada hoy: el onboarding (crear organización) sigue síncrono vía Action a `POST /auth0/onboarding`, porque el Action espera la respuesta. |
 | `identity.user.deleted` | no | `{ userId: string }` | log `du` | Marcar el `AccountUser` inactivo en las organizaciones donde exista. |
+| `identity.signup.requested` | no | `{ user: string; email: string; company: { name: string; email?: string } }` | Action post-login (formulario de empresa) | Crear la organización en Auth0 con el usuario como miembro (self-service signup). Implementado en 0.2.8. |
 
 `organization` se completa cuando el log trae `organization_id`, pero no es obligatoria: en signup y
 borrado el usuario no pertenece a una organización en ese momento.

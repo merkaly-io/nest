@@ -118,6 +118,15 @@ LoggerModule.forRootAsync({
 
 Contrato completo em [`docs/events.md`](docs/events.md). Eventos de negócio normalizados (`payment.received`, nunca `asaas.payment_received`): se o provedor muda, o consumidor não muda.
 
+Grupos (o primeiro segmento do tipo):
+
+| Grupo | Tipos | Origem |
+| --- | --- | --- |
+| `payment.*` | cobranças do store e subconta do comerciante (`payment.account.*`) | Asaas |
+| `identity.*` | identidade: `identity.signup.requested` (usuário novo sem organização preenche o formulário da empresa no Action post-login; o api cria a organização com ele como membro) | Auth0 |
+
+`identity.signup.requested` leva `data: { user, email, company: { name, email? } }` (id do usuário no Auth0, ex. `auth0|abc`); o momento é o `occurredAt` do evento, sem campo próprio.
+
 ```ts
 // produtor: data tipado pelo tipo; resolve com o evento ou ServiceUnavailableException (o provedor reintenta)
 await this.events.emit(MerkalyEventType.PAYMENT_RECEIVED, { ...paymentRef, receivedAt }, {
