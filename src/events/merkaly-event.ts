@@ -13,6 +13,7 @@ export enum MerkalyEventType {
   PAYMENT_ACCOUNT_APPROVED = 'payment.account.approved',
   PAYMENT_ACCOUNT_REJECTED = 'payment.account.rejected',
   PAYMENT_ACCOUNT_STATUS_CHANGED = 'payment.account.status_changed',
+  IDENTITY_SIGNUP_REQUESTED = 'identity.signup.requested',
 }
 
 export enum MerkalyProducer {
@@ -47,6 +48,17 @@ export interface PaymentAccountRef {
   accountId: string; // merchant subconta
 }
 
+export interface SignupCompany {
+  name: string;
+  email?: string; // company contact, may differ from the user's
+}
+
+export interface IdentitySignupRequested {
+  user: string; // Auth0 user id, auth0|...
+  email: string; // the user's email
+  company: SignupCompany;
+}
+
 export interface EventDataMap {
   [MerkalyEventType.PAYMENT_CONFIRMED]: PaymentRef & { confirmedAt: string };
   [MerkalyEventType.PAYMENT_RECEIVED]: PaymentRef & { receivedAt: string };
@@ -64,6 +76,7 @@ export interface EventDataMap {
     section: PaymentAccountSection;
     status: PaymentAccountStatus;
   };
+  [MerkalyEventType.IDENTITY_SIGNUP_REQUESTED]: IdentitySignupRequested; // when: occurredAt
 }
 
 export interface MerkalyRawEvent {
