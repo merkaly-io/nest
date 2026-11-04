@@ -35,6 +35,10 @@ export interface PaymentRef {
   method: PaymentMethod;
   amount: number; // cents
   netAmount: number | null; // cents, after the provider fee
+  providerEvent?: string; // provider event name, PAYMENT_RECEIVED
+  providerStatus?: string; // provider payment status, RECEIVED
+  walletId?: string | null; // merchant subconta wallet, from the split
+  externalReference?: string | null; // untouched, <orgId>:<saleId>
 }
 
 export type PaymentAccountSection =
