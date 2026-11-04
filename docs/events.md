@@ -1,6 +1,6 @@
 # Contrato de eventos entre servicios
 
-Estado: **aprobado por el Founder; tipos de pagos y subconta implementados en `@merkaly/nest` 0.2.0** (exchange decidido el 2026-11-02). El resto del catálogo entra por proveedor.
+Estado: **aprobado por el Founder; tipos de pagos y subconta implementados en `@merkaly/nest` 0.2.0 (campos de diagnóstico de `PaymentRef` en 0.2.9)** (exchange decidido el 2026-11-02). El resto del catálogo entra por proveedor.
 
 Antes, `webhooks.merkaly.io` publicaba en `api.merkaly.io-queue` el evento crudo de cada proveedor
 (`asaas.payment_received`, `stripe.invoice.paid`...) con el sobre `WebhookEvent`, que en 0.2.0 se
@@ -145,17 +145,24 @@ Productor de todos: `webhooks.merkaly.io`, al exchange `merkaly.events`. Consumi
 **no** = el productor no la conoce.
 
 ```ts
-type PaymentMethod = 'PIX' | 'CARD';
+type PaymentMethod = 'PIX' | 'CARD' | 'BOLETO';
 
 interface PaymentRef {
   provider: 'asaas';
   paymentId: string; // pay_... de Asaas
-  saleId: string | null; // externalReference = id de la venta
+  saleId: string | null; // del externalReference <orgId>:<saleId>
   method: PaymentMethod;
   amount: number; // centavos (Asaas manda reais decimales)
   netAmount: number | null; // centavos, después de la tarifa
+  providerEvent?: string; // evento de Asaas tal cual (PAYMENT_RECEIVED), desde 0.2.9
+  providerStatus?: string; // payment.status de Asaas (RECEIVED, CONFIRMED...), desde 0.2.9
+  walletId?: string | null; // wallet de la subconta, del split; null sin split, desde 0.2.9
+  externalReference?: string | null; // externalReference sin tocar, desde 0.2.9
 }
 ```
+
+Los cuatro campos de 0.2.9 son opcionales (patch): sirven para logs, diagnóstico y para no leer
+`raw`. El api no decide con ellos: relee el pago en Asaas (el evento es un disparador).
 
 ### Pagos del store (Asaas, `/asaas`)
 
@@ -298,7 +305,7 @@ pierde).
 | 1 | nest | minor (0.2.0) | `MerkalyEvent<K>`, `MerkalyEventType`, `EventDataMap` (pagos y subconta), `MerkalyProducer`, `EventsPublisher.emit` al exchange, `EventsConsumer` (ack, `.retry`, `.dlq`, `around` para el contexto del app). Se quitan `WebhookEvent`, `WebhookPatterns`, `toPattern` y `createWebhookEvent` (nadie los importaba: webhooks tenía su copia). |
 | 2 | webhooks | patch | Asaas traducido a `payment.*` con `emit`, `raw` saneado, `value` de reais a centavos. Stripe, Auth0 y AliExpress: se descartan con log hasta tener su traducción (nadie los consume; Stripe y Auth0 siguen llegando directo al api). |
 | 3 | infra | n/a | Borrar la cola vieja `api.merkaly.io-queue` (mensajes crudos sin consumidor). La cola nueva la crea el api al arrancar. |
-| 4 | api | patch | Consumidor de `payment.*` y `payment.account.*` en la cola `api.merkaly.io`. El endpoint del store pasa a leer solo Mongo; se quita el polling contra Asaas apenas funcione. |
+| 4 | api | patch | Consumidor de `payment.*` y `payment.account.*` en la cola `api.merkaly.io`. El endpoint del store lee solo Mongo y el checkout sigue el cobro por SSE; queda una relectura lenta en Asaas como red de seguridad si no llega el evento. |
 | 5 | nest + webhooks + api | patch | Resto del catálogo por proveedor: AliExpress (`supplier.*`, con `aliexpressSellerId` e índice), Stripe (`subscription.*`, mover el webhook del api), Auth0 (`identity.*`). |
 | 6 | payments | fuera de alcance | `payments.merkaly.io` declara su cola ligada a lo que necesite; publica su resultado con `producer: payments.merkaly.io`. |
 

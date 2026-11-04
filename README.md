@@ -125,6 +125,8 @@ Grupos (o primeiro segmento do tipo):
 | `payment.*` | cobranças do store e subconta do comerciante (`payment.account.*`) | Asaas |
 | `identity.*` | identidade: `identity.signup.requested` (usuário novo sem organização preenche o formulário da empresa no Action post-login; o api cria a organização com ele como membro) | Auth0 |
 
+Os eventos `payment.*` de cobrança levam `PaymentRef`: `provider`, `paymentId`, `saleId`, `method`, `amount` e `netAmount` (centavos) e, desde 0.2.9, os opcionais `providerEvent` (ex. `PAYMENT_RECEIVED`), `providerStatus`, `walletId` (subconta do split) e `externalReference` (sem tocar), para diagnóstico sem ler `raw`.
+
 `identity.signup.requested` leva `data: { user, email, company: { name, email? } }` (id do usuário no Auth0, ex. `auth0|abc`); o momento é o `occurredAt` do evento, sem campo próprio.
 
 ```ts
