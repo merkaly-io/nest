@@ -200,7 +200,7 @@ dueño de `purchase.supplierOrder`, **resincroniza** con `OrderSupplierOrderServ
 
 | Tipo | Org | `data` | Mensaje AliExpress | Qué haría el api |
 | --- | --- | --- | --- | --- |
-| `supplier.order.status_changed` | no (la resuelve el api por `sellerId`) | `{ provider: 'aliexpress'; sellerId: string; externalOrderId: string; reference: string \| null; providerStatus: string; status?: 'AWAITING_PAYMENT' \| 'PAID' \| 'SHIPPED' \| 'DELIVERED' \| 'CANCELLED' }` | 53 (`dropshipper_order_status_update`) | Resolver la organización, buscar la compra por `supplierOrder.externalOrderIds` y `sync()`. |
+| `supplier.order.status_changed` | no (la resuelve el api por `sellerId`) | `{ provider: 'aliexpress'; sellerId: string; externalOrderId: string; reference: string \| null; providerStatus: string; status?: 'AWAITING_PAYMENT' \| 'PAID' \| 'SHIPPED' \| 'DELIVERED' \| 'CANCELLED' }` | 53 (`dropshipper_order_status_update`) | Resolver la organización, buscar la compra por `supplierOrder.externalOrderIds` y `sync()`. Contrato desde 0.2.11 (falta que webhooks lo publique). |
 | `supplier.order.tracking_updated` | no (la resuelve el api por `sellerId`) | `{ provider: 'aliexpress'; sellerId: string; externalOrderId: string; trackingNumbers: string[] }` | 18 (`waybill_changed`) | Resolver la organización y `sync()` (trae carrier y url; el comprador nunca ve el proveedor). |
 | `supplier.product.removed` | no (global) | `{ provider: 'aliexpress'; externalProductId: string }` | 15 (`product_deleted`) | **Recorrer las tiendas**, encontrar las que importaron ese producto, inactivar sus variantes y alertar. A futuro: índice inverso `externalProductId -> organizaciones`. |
 | `supplier.product.updated` | no (global) | `{ provider: 'aliexpress'; externalProductId: string; country?: string; event?: string; occurredAt?: string }` | 61 (`product_updated`, DropShip Product Update) | Pendiente hasta ver pushes reales: recorrer las tiendas que importaron el producto y releerlo en AliExpress (`OUT_OF_STOCK`: inactivar variantes y alertar). Implementado en 0.2.10 (solo el contrato; webhooks lo publica, el api aún no lo consume). |
@@ -229,7 +229,7 @@ Resolución `seller_id -> organización` (en el api; webhooks no tiene base):
 | Fuente de verdad | Metadata de la organización en Auth0: `aliexpressSellerId`. La escribe el api cuando la tienda conecta AliExpress y la borra al desconectar. |
 | Por qué un índice | Auth0 no permite buscar organizaciones por metadata. |
 | Índice en memoria | `Map<sellerId, organization>` armado al arrancar listando las organizaciones, actualizado en connect y disconnect, y refrescado periódicamente. |
-| `sellerId` desconocido | Refrescar el índice una vez; si sigue sin aparecer, `nack` sin requeue a la `.dlq` con error visible en el log. |
+| `sellerId` desconocido | Refrescar el índice una vez; si sigue sin aparecer, ack con warning en el log (reintentar no lo arregla). Igual con un pedido que no está en la tienda. |
 | A futuro (escala) | Colección global en Mongo `sellerId -> organization` con índice único. |
 
 ### Suscripción de Merkaly (Stripe, `/stripe`)

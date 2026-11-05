@@ -124,13 +124,15 @@ Grupos (o primeiro segmento do tipo):
 | --- | --- | --- |
 | `payment.*` | cobranças do store e subconta do comerciante (`payment.account.*`) | Asaas |
 | `identity.*` | identidade: `identity.signup.requested` (usuário novo sem organização preenche o formulário da empresa no Action post-login; o api cria a organização com ele como membro) | Auth0 |
-| `supplier.*` | produto do fornecedor: `supplier.product.updated` (mensagem 61 do AliExpress, ex. sem estoque) | AliExpress |
+| `supplier.*` | produto do fornecedor: `supplier.product.updated` (mensagem 61 do AliExpress, ex. sem estoque); pedido do fornecedor: `supplier.order.status_changed` (mensagem 53) | AliExpress |
 
 Os eventos `payment.*` de cobrança levam `PaymentRef`: `provider`, `paymentId`, `saleId`, `method`, `amount` e `netAmount` (centavos) e, desde 0.2.9, os opcionais `providerEvent` (ex. `PAYMENT_RECEIVED`), `providerStatus`, `walletId` (subconta do split) e `externalReference` (sem tocar), para diagnóstico sem ler `raw`.
 
 `identity.signup.requested` leva `data: { user, email, company: { name, email? } }` (id do usuário no Auth0, ex. `auth0|abc`); o momento é o `occurredAt` do evento, sem campo próprio.
 
 `supplier.product.updated` (desde 0.2.10) leva `data: { provider: 'aliexpress', externalProductId, country?, event?, occurredAt? }`: `externalProductId` é o `item_id` como string (passa de 2^53), `event` é o `update_event` sem tocar (`OUT_OF_STOCK`; os outros valores não estão documentados) e `occurredAt` vem de `event_time_stamps`. É global, sem `organization`: o consumidor procura as lojas que importaram o produto.
+
+`supplier.order.status_changed` (desde 0.2.11) leva `data: { provider: 'aliexpress', sellerId, externalOrderId, reference, providerStatus, status? }`: `sellerId` é o `seller_id` da conta AliExpress do comerciante (o api resolve a organização por ele), `externalOrderId` é o id do pedido DS como string, `providerStatus` é o `orderStatus` sem tocar e `status` é o estado grosso (omitido quando ambíguo, ex. `OrderClosed`). O api relê o pedido no AliExpress em vez de confiar no push.
 
 ```ts
 // produtor: data tipado pelo tipo; resolve com o evento ou ServiceUnavailableException (o provedor reintenta)

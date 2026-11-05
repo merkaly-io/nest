@@ -15,6 +15,7 @@ export enum MerkalyEventType {
   PAYMENT_ACCOUNT_STATUS_CHANGED = 'payment.account.status_changed',
   IDENTITY_SIGNUP_REQUESTED = 'identity.signup.requested',
   SUPPLIER_PRODUCT_UPDATED = 'supplier.product.updated',
+  SUPPLIER_ORDER_STATUS_CHANGED = 'supplier.order.status_changed',
 }
 
 export enum MerkalyProducer {
@@ -74,6 +75,18 @@ export interface SupplierProductUpdated {
   occurredAt?: string; // ISO, from event_time_stamps
 }
 
+export type SupplierOrderStatus =
+  'AWAITING_PAYMENT' | 'PAID' | 'SHIPPED' | 'DELIVERED' | 'CANCELLED';
+
+export interface SupplierOrderStatusChanged {
+  provider: SupplierProvider;
+  sellerId: string; // AliExpress seller_id of the merchant account, the api resolves the organization
+  externalOrderId: string; // DS order id, string: ids exceed 2^53
+  reference: string | null; // our out_order_id, only if AliExpress sends it
+  providerStatus: string; // orderStatus as sent, AliexpressOrderStatus
+  status?: SupplierOrderStatus; // coarse hint, omitted when ambiguous (OrderClosed)
+}
+
 export interface EventDataMap {
   [MerkalyEventType.PAYMENT_CONFIRMED]: PaymentRef & { confirmedAt: string };
   [MerkalyEventType.PAYMENT_RECEIVED]: PaymentRef & { receivedAt: string };
@@ -93,6 +106,7 @@ export interface EventDataMap {
   };
   [MerkalyEventType.IDENTITY_SIGNUP_REQUESTED]: IdentitySignupRequested; // when: occurredAt
   [MerkalyEventType.SUPPLIER_PRODUCT_UPDATED]: SupplierProductUpdated; // global, no organization
+  [MerkalyEventType.SUPPLIER_ORDER_STATUS_CHANGED]: SupplierOrderStatusChanged; // organization resolved by the api
 }
 
 export interface MerkalyRawEvent {
