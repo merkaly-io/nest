@@ -55,6 +55,7 @@ export enum MerkalyEventType {
   SUPPLIER_ORDER_STATUS_CHANGED = 'supplier.order.status_changed',
   SUPPLIER_ORDER_TRACKING_UPDATED = 'supplier.order.tracking_updated',
   SUPPLIER_PRODUCT_REMOVED = 'supplier.product.removed',
+  SUPPLIER_PRODUCT_UPDATED = 'supplier.product.updated',
   SUBSCRIPTION_INVOICE_PAID = 'subscription.invoice.paid',
   SUBSCRIPTION_INVOICE_PAYMENT_FAILED = 'subscription.invoice.payment_failed',
   SUBSCRIPTION_UPDATED = 'subscription.updated',
@@ -202,6 +203,14 @@ dueño de `purchase.supplierOrder`, **resincroniza** con `OrderSupplierOrderServ
 | `supplier.order.status_changed` | no (la resuelve el api por `sellerId`) | `{ provider: 'aliexpress'; sellerId: string; externalOrderId: string; reference: string \| null; providerStatus: string; status?: 'AWAITING_PAYMENT' \| 'PAID' \| 'SHIPPED' \| 'DELIVERED' \| 'CANCELLED' }` | 53 (`dropshipper_order_status_update`) | Resolver la organización, buscar la compra por `supplierOrder.externalOrderIds` y `sync()`. |
 | `supplier.order.tracking_updated` | no (la resuelve el api por `sellerId`) | `{ provider: 'aliexpress'; sellerId: string; externalOrderId: string; trackingNumbers: string[] }` | 18 (`waybill_changed`) | Resolver la organización y `sync()` (trae carrier y url; el comprador nunca ve el proveedor). |
 | `supplier.product.removed` | no (global) | `{ provider: 'aliexpress'; externalProductId: string }` | 15 (`product_deleted`) | **Recorrer las tiendas**, encontrar las que importaron ese producto, inactivar sus variantes y alertar. A futuro: índice inverso `externalProductId -> organizaciones`. |
+| `supplier.product.updated` | no (global) | `{ provider: 'aliexpress'; externalProductId: string; country?: string; event?: string; occurredAt?: string }` | 61 (`product_updated`, DropShip Product Update) | Pendiente hasta ver pushes reales: recorrer las tiendas que importaron el producto y releerlo en AliExpress (`OUT_OF_STOCK`: inactivar variantes y alertar). Implementado en 0.2.10 (solo el contrato; webhooks lo publica, el api aún no lo consume). |
+
+Mensaje 61: el cuerpo documentado es `{ item_id, country_code, update_event, event_time_stamps }`, pero no está
+confirmado si viene dentro de `data` o en la raíz del sobre; webhooks lee `data` y cae a la raíz.
+`externalProductId` = `item_id` como string, `country` = `country_code`, `event` = `update_event` sin
+tocar (solo `OUT_OF_STOCK` está documentado), `occurredAt` = `event_time_stamps` (milisegundos) en ISO.
+`id` = `aliexpress:61:<item_id>:<event_time_stamps>` (estable entre reintentos del mismo push); sin
+`event_time_stamps`, el hash del mensaje. Sin `item_id`: 200, log de aviso, no se publica.
 
 Estado grueso desde `orderStatus` del push (constante `AliexpressOrderStatus` del paquete):
 
@@ -261,7 +270,7 @@ Se responde 200 al proveedor, se **descarta con log en debug** y no se publica (
 | Auth0 | `s` (login ok), `slo`, `sv`, `scp`, `scpr`, `sce`, `sapi`, `fapi`, `fs` | Volumen alto o ruido; el api ya sincroniza el usuario en cada request autenticado (`account.user.sync.requested`). |
 | Auth0 | `f`, `fp`, `fu` (login fallido), `limit_wc` (usuario bloqueado) | Fuera del catálogo por ahora; entran (patch) cuando haya consumidor de alertas de seguridad. |
 | Auth0 | eventos de Actions no registrados (incluido `user_login` del post-login) | Se agregan al enum cuando exista un Action con consumidor. |
-| AliExpress | 1 a 12, 20, 41 | Mensajes de pedidos del lado vendedor; Merkaly es comprador DS y solo usa 53. |
+| AliExpress | 1 a 12, 20, 41 | Mensajes de pedidos del lado vendedor; Merkaly es comprador DS y solo usa 53 (pedido) y 61 (producto). |
 | AliExpress | 0 (`test_push`) | Botón de prueba de la consola, solo se loguea. |
 
 ## 5. Routing
@@ -318,6 +327,7 @@ pierde).
 | Eventos no traducidos | Se descartan con log en debug; sin `webhook.unmapped`. |
 | Organización en AliExpress | `aliexpressSellerId` en la metadata de la organización en Auth0 (fuente de verdad) + índice en memoria `sellerId -> organización` en el api (Auth0 no busca por metadata). Desconocido: refresco y luego `.dlq`. A escala: colección global en Mongo. |
 | `supplier.product.removed` | Sin organización; el api recorre las tiendas. A futuro: índice inverso. |
+| `supplier.product.updated` | Igual que `removed`: global. `id` determinista `aliexpress:61:<item_id>:<event_time_stamps>`; `update_event` como string libre. |
 | Auth0 login fallido y bloqueo | Fuera del catálogo por ahora. |
 | Stripe sin `AUTH0_ORG_ID` | 200, log de error, no se publica. |
 | Tipado | `data: EventDataMap[K]`, `emit(type, data)` y handlers tipados; `raw` opcional en todos, `unknown`, 16 KB, saneado, nunca leído por consumidores. |

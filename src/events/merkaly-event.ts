@@ -14,6 +14,7 @@ export enum MerkalyEventType {
   PAYMENT_ACCOUNT_REJECTED = 'payment.account.rejected',
   PAYMENT_ACCOUNT_STATUS_CHANGED = 'payment.account.status_changed',
   IDENTITY_SIGNUP_REQUESTED = 'identity.signup.requested',
+  SUPPLIER_PRODUCT_UPDATED = 'supplier.product.updated',
 }
 
 export enum MerkalyProducer {
@@ -63,6 +64,16 @@ export interface IdentitySignupRequested {
   company: SignupCompany;
 }
 
+export type SupplierProvider = 'aliexpress';
+
+export interface SupplierProductUpdated {
+  provider: SupplierProvider;
+  externalProductId: string; // AliExpress item_id, string: ids exceed 2^53
+  country?: string; // country_code, e.g. US
+  event?: string; // update_event as sent, OUT_OF_STOCK (others undocumented)
+  occurredAt?: string; // ISO, from event_time_stamps
+}
+
 export interface EventDataMap {
   [MerkalyEventType.PAYMENT_CONFIRMED]: PaymentRef & { confirmedAt: string };
   [MerkalyEventType.PAYMENT_RECEIVED]: PaymentRef & { receivedAt: string };
@@ -81,6 +92,7 @@ export interface EventDataMap {
     status: PaymentAccountStatus;
   };
   [MerkalyEventType.IDENTITY_SIGNUP_REQUESTED]: IdentitySignupRequested; // when: occurredAt
+  [MerkalyEventType.SUPPLIER_PRODUCT_UPDATED]: SupplierProductUpdated; // global, no organization
 }
 
 export interface MerkalyRawEvent {
