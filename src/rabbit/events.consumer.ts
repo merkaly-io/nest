@@ -1,6 +1,6 @@
 import { Inject, Injectable, Optional } from '@nestjs/common';
 import { RmqContext } from '@nestjs/microservices';
-import { MerkalyEvent, MerkalyEventType } from '../events';
+import { MerkalyEvent } from '../events';
 import { LoggerService, requestContext } from '../logger';
 import { describeError } from './events.publisher';
 import { deadLetterQueue, retryQueue } from './rabbit.consumer';
@@ -28,10 +28,10 @@ export class EventsConsumer {
   }
 
   // Runs the handler and settles the message: ack, .retry or .dlq
-  public handle<K extends MerkalyEventType>(
-    event: MerkalyEvent<K>,
+  public handle<T>(
+    event: MerkalyEvent<T>,
     context: RmqContext,
-    handler: (event: MerkalyEvent<K>) => Promise<unknown>,
+    handler: (event: MerkalyEvent<T>) => Promise<unknown>,
     { version = 1 }: HandleOptions = {},
   ): Promise<void> {
     const started = Date.now();

@@ -1,22 +1,6 @@
 import { randomUUID } from 'crypto';
 
-// Business event names, `<domain>.<entity>.<fact>`: the value is the routing key
-export enum MerkalyEventType {
-  PAYMENT_CONFIRMED = 'payment.confirmed',
-  PAYMENT_RECEIVED = 'payment.received',
-  PAYMENT_FAILED = 'payment.failed',
-  PAYMENT_OVERDUE = 'payment.overdue',
-  PAYMENT_CANCELLED = 'payment.cancelled',
-  PAYMENT_REFUNDED = 'payment.refunded',
-  PAYMENT_CHARGEBACK_OPENED = 'payment.chargeback.opened',
-  PAYMENT_CHARGEBACK_UPDATED = 'payment.chargeback.updated',
-  PAYMENT_ACCOUNT_APPROVED = 'payment.account.approved',
-  PAYMENT_ACCOUNT_REJECTED = 'payment.account.rejected',
-  PAYMENT_ACCOUNT_STATUS_CHANGED = 'payment.account.status_changed',
-  IDENTITY_SIGNUP_REQUESTED = 'identity.signup.requested',
-  SUPPLIER_PRODUCT_UPDATED = 'supplier.product.updated',
-  SUPPLIER_ORDER_STATUS_CHANGED = 'supplier.order.status_changed',
-}
+// Business event names are plain strings, `<domain>.<entity>.<fact>` (payment.received): the value is the routing key
 
 export enum MerkalyProducer {
   WEBHOOKS = 'webhooks.merkaly.io',
@@ -87,37 +71,15 @@ export interface SupplierOrderStatusChanged {
   status?: SupplierOrderStatus; // coarse hint, omitted when ambiguous (OrderClosed)
 }
 
-export interface EventDataMap {
-  [MerkalyEventType.PAYMENT_CONFIRMED]: PaymentRef & { confirmedAt: string };
-  [MerkalyEventType.PAYMENT_RECEIVED]: PaymentRef & { receivedAt: string };
-  [MerkalyEventType.PAYMENT_FAILED]: PaymentRef & { reason: 'card_refused' | 'risk_rejected' };
-  [MerkalyEventType.PAYMENT_OVERDUE]: PaymentRef & { dueDate: string };
-  [MerkalyEventType.PAYMENT_CANCELLED]: PaymentRef;
-  [MerkalyEventType.PAYMENT_REFUNDED]: PaymentRef & { refundedAmount: number; partial: boolean };
-  [MerkalyEventType.PAYMENT_CHARGEBACK_OPENED]: PaymentRef & { reason: string | null };
-  [MerkalyEventType.PAYMENT_CHARGEBACK_UPDATED]: PaymentRef & {
-    stage: 'disputed' | 'awaiting_reversal';
-  };
-  [MerkalyEventType.PAYMENT_ACCOUNT_APPROVED]: PaymentAccountRef;
-  [MerkalyEventType.PAYMENT_ACCOUNT_REJECTED]: PaymentAccountRef;
-  [MerkalyEventType.PAYMENT_ACCOUNT_STATUS_CHANGED]: PaymentAccountRef & {
-    section: PaymentAccountSection;
-    status: PaymentAccountStatus;
-  };
-  [MerkalyEventType.IDENTITY_SIGNUP_REQUESTED]: IdentitySignupRequested; // when: occurredAt
-  [MerkalyEventType.SUPPLIER_PRODUCT_UPDATED]: SupplierProductUpdated; // global, no organization
-  [MerkalyEventType.SUPPLIER_ORDER_STATUS_CHANGED]: SupplierOrderStatusChanged; // organization resolved by the api
-}
-
 export interface MerkalyRawEvent {
   type: string; // provider event type, untouched
   payload?: unknown; // audit only, consumers never read it
   truncated?: boolean; // payload dropped for size
 }
 
-export interface MerkalyEvent<K extends MerkalyEventType = MerkalyEventType> {
+export interface MerkalyEvent<T = unknown> {
   id: string; // idempotency key, `<source>:<provider id>` or a UUID
-  type: K;
+  type: string; // payment.received, supplier.order.status_changed...
   version: number; // contract version of `data` for this type
   producer: MerkalyProducer;
   source?: MerkalyEventSource;
@@ -125,7 +87,7 @@ export interface MerkalyEvent<K extends MerkalyEventType = MerkalyEventType> {
   occurredAt: string; // ISO, when it happened at the provider
   publishedAt: string; // ISO
   correlationId?: string;
-  data: EventDataMap[K];
+  data: T; // shape agreed per type, see docs/events.md
   raw?: MerkalyRawEvent;
 }
 
@@ -150,12 +112,12 @@ function capRaw(raw?: MerkalyRawEvent): MerkalyRawEvent | undefined {
   return size > RAW_PAYLOAD_LIMIT ? { type: raw.type, truncated: true } : raw;
 }
 
-export function createMerkalyEvent<K extends MerkalyEventType>(
+export function createMerkalyEvent<T>(
   producer: MerkalyProducer,
-  type: K,
-  data: EventDataMap[K],
+  type: string,
+  data: T,
   meta: MerkalyEventMeta = {},
-): MerkalyEvent<K> {
+): MerkalyEvent<T> {
   const publishedAt = new Date().toISOString();
 
   return {

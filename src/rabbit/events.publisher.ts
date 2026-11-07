@@ -7,13 +7,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { lastValueFrom, timeout } from 'rxjs';
-import {
-  EventDataMap,
-  MerkalyEvent,
-  MerkalyEventMeta,
-  MerkalyEventType,
-  createMerkalyEvent,
-} from '../events';
+import { MerkalyEvent, MerkalyEventMeta, createMerkalyEvent } from '../events';
 import { LoggerService, noteRequest } from '../logger';
 import {
   BrokerStatus,
@@ -77,11 +71,7 @@ export class EventsPublisher implements OnApplicationBootstrap, OnApplicationShu
   }
 
   // Resolves with the event once the broker took it; ServiceUnavailableException otherwise
-  public emit<K extends MerkalyEventType>(
-    type: K,
-    data: EventDataMap[K],
-    meta?: MerkalyEventMeta,
-  ): Promise<MerkalyEvent<K>> {
+  public emit<T>(type: string, data: T, meta?: MerkalyEventMeta): Promise<MerkalyEvent<T>> {
     if (!this.client) {
       return Promise.reject(new ServiceUnavailableException('Event broker is not configured'));
     }

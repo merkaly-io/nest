@@ -10,19 +10,21 @@ Principios:
 
 - **Eventos de negocio normalizados**; el evento original del proveedor viaja adentro solo para
   auditoría.
-- Un **enum** (`MerkalyEventType`) registra todos los tipos.
+- Los tipos son **strings** (`payment.received`); el catálogo de este documento es la referencia. Desde 0.3.0 no hay enum ni mapa de tipos en el paquete.
 - El sobre dice **qué app lo produjo**.
-- `data` es un **contrato tipado** por tipo de evento.
+- `data` es un **contrato acordado** por tipo de evento (interfaces opcionales como `PaymentRef`).
 
 ## 1. Por qué el contrato vive en `@merkaly/nest`
 
 `@merkaly/nest` ya es la dependencia común de los backends (api, webhooks, payments) y ya exporta
-`RabbitModule`, `EventsPublisher` y `EventsConsumer`. Productor y consumidor
-importan el mismo tipo y el mismo enum: si el productor cambia un campo, el build del consumidor se
-rompe en vez de fallar en producción.
+`RabbitModule`, `EventsPublisher` y `EventsConsumer`. El paquete define el sobre (`MerkalyEvent<T>`)
+y algunas interfaces de `data` reutilizables (`PaymentRef`, `SupplierOrderStatusChanged`...); el
+`type` es un string libre.
 
-**Costo:** cualquier cambio de contrato exige publicar el paquete y subir la dependencia en cada
-servicio.
+Hasta 0.2.x había un enum `MerkalyEventType` y un `EventDataMap` que tipaban `data` por tipo. Se
+quitaron en 0.3.0 (decisión del Founder, 2026-11-07): obligaban a publicar el paquete por cada
+evento nuevo y no evitaban errores reales. Un evento nuevo ya no toca el paquete: el productor
+emite el string y el consumidor lo escucha, documentándolo en el catálogo.
 
 | Alternativa | Por qué no |
 | --- | --- |
@@ -36,51 +38,16 @@ servicio.
 | --- | --- |
 | Forma | `<dominio>.<entidad>.<hecho>` o `<dominio>.<hecho>` cuando la entidad es el propio dominio. Segmentos separados por punto, en minúsculas, en inglés. |
 | Hecho | En pasado; si necesita dos palabras, snake_case (`status_changed`, `signed_up`). |
-| Enum | Clave en SCREAMING_SNAKE con todos los segmentos: `SUPPLIER_ORDER_STATUS_CHANGED = 'supplier.order.status_changed'`. |
-| Patrón | El valor del enum es el patrón de Nest RMQ y la routing key. |
-
-```ts
-export enum MerkalyEventType {
-  PAYMENT_CONFIRMED = 'payment.confirmed',
-  PAYMENT_RECEIVED = 'payment.received',
-  PAYMENT_FAILED = 'payment.failed',
-  PAYMENT_OVERDUE = 'payment.overdue',
-  PAYMENT_CANCELLED = 'payment.cancelled',
-  PAYMENT_REFUNDED = 'payment.refunded',
-  PAYMENT_CHARGEBACK_OPENED = 'payment.chargeback.opened',
-  PAYMENT_CHARGEBACK_UPDATED = 'payment.chargeback.updated',
-  PAYMENT_ACCOUNT_APPROVED = 'payment.account.approved',
-  PAYMENT_ACCOUNT_REJECTED = 'payment.account.rejected',
-  PAYMENT_ACCOUNT_STATUS_CHANGED = 'payment.account.status_changed',
-  SUPPLIER_ORDER_STATUS_CHANGED = 'supplier.order.status_changed',
-  SUPPLIER_ORDER_TRACKING_UPDATED = 'supplier.order.tracking_updated',
-  SUPPLIER_PRODUCT_REMOVED = 'supplier.product.removed',
-  SUPPLIER_PRODUCT_UPDATED = 'supplier.product.updated',
-  SUBSCRIPTION_INVOICE_PAID = 'subscription.invoice.paid',
-  SUBSCRIPTION_INVOICE_PAYMENT_FAILED = 'subscription.invoice.payment_failed',
-  SUBSCRIPTION_UPDATED = 'subscription.updated',
-  SUBSCRIPTION_CANCELLED = 'subscription.cancelled',
-  IDENTITY_USER_SIGNED_UP = 'identity.user.signed_up',
-  IDENTITY_USER_DELETED = 'identity.user.deleted',
-  IDENTITY_SIGNUP_REQUESTED = 'identity.signup.requested',
-}
-```
+| Patrón | El string del tipo es el patrón de Nest RMQ y la routing key. |
 
 ## 3. Sobre (envelope) y tipado
 
-`data` se tipa con un `EventDataMap` indexado por tipo de evento: el productor no puede emitir un
-`data` que no corresponda al `type` y el handler recibe `data` ya tipado.
+`type` es un string y `data` un genérico: el consumidor declara qué forma espera.
 
 ```ts
-export interface EventDataMap {
-  [MerkalyEventType.PAYMENT_CONFIRMED]: PaymentRef & { confirmedAt: string };
-  [MerkalyEventType.SUPPLIER_PRODUCT_REMOVED]: { provider: 'aliexpress'; externalProductId: string };
-  // ... una entrada por cada valor del enum (ver catálogo)
-}
-
-export interface MerkalyEvent<K extends MerkalyEventType = MerkalyEventType> {
+export interface MerkalyEvent<T = unknown> {
   id: string;
-  type: K;
+  type: string; // payment.confirmed
   version: number;
   producer: MerkalyProducer;
   source?: MerkalyEventSource;
@@ -88,7 +55,7 @@ export interface MerkalyEvent<K extends MerkalyEventType = MerkalyEventType> {
   occurredAt: string;
   publishedAt: string;
   correlationId?: string;
-  data: EventDataMap[K];
+  data: T;
   raw?: MerkalyRawEvent;
 }
 
@@ -107,19 +74,19 @@ export enum MerkalyProducer {
 export type MerkalyEventSource = 'asaas' | 'stripe' | 'auth0' | 'aliexpress';
 
 // productor
-publisher.emit(MerkalyEventType.PAYMENT_CONFIRMED, { ...ref, confirmedAt }, { organization, source: 'asaas', raw });
+publisher.emit('payment.confirmed', { ...ref, confirmedAt }, { organization, source: 'asaas', raw });
 
 // consumidor
-@OnMerkalyEvent(MerkalyEventType.PAYMENT_CONFIRMED)
-handle(event: MerkalyEvent<MerkalyEventType.PAYMENT_CONFIRMED>) {
-  event.data.paymentId; // string, tipado
+@OnMerkalyEvent('payment.confirmed')
+handle(event: MerkalyEvent<PaymentRef & { confirmedAt: string }>) {
+  event.data.paymentId; // string, por la forma que declara el handler
 }
 ```
 
 | Campo | Obligatorio | Regla |
 | --- | --- | --- |
 | `id` | sí | Clave de idempotencia; el consumidor deduplica por ella. Evento de proveedor: `<source>:<id del proveedor>` (`asaas:evt_...`, `stripe:evt_...`, `auth0:<log_id>`). AliExpress no manda id: `aliexpress:<sha256 del mensaje, 32 hex>`. Evento interno: UUID v4. Un evento de proveedor produce como máximo un evento normalizado; si algún día produce varios, se sufija `#<type>`. |
-| `type` | sí | Valor de `MerkalyEventType`. |
+| `type` | sí | String del catálogo (`payment.confirmed`). |
 | `version` | sí | Versión del contrato de `data` para ese `type`, entero desde 1. No es la versión del paquete. |
 | `producer` | sí | Repo que publicó (`MerkalyProducer`). |
 | `source` | no | Proveedor externo de origen. Ausente en eventos internos. |
@@ -127,7 +94,7 @@ handle(event: MerkalyEvent<MerkalyEventType.PAYMENT_CONFIRMED>) {
 | `occurredAt` | sí | ISO 8601 UTC del hecho según el proveedor (Asaas `dateCreated`, Stripe `created`, Auth0 `date`, AliExpress `timestamp`). Si falta, igual a `publishedAt`. |
 | `publishedAt` | sí | ISO 8601 UTC del momento de publicar. Reemplaza `receivedAt`. |
 | `correlationId` | no | Id del request HTTP que originó el evento (el del logger); un evento derivado hereda el del padre. Sirve para seguir un flujo en los logs de varios servicios. |
-| `data` | sí | Contrato tipado (`EventDataMap[type]`). Montos en **centavos enteros**, fechas ISO, ids del proveedor como string (los de AliExpress superan 2^53). |
+| `data` | sí | Contrato acordado por tipo (catálogo). Montos en **centavos enteros**, fechas ISO, ids del proveedor como string (los de AliExpress superan 2^53). |
 | `raw` | no | Opcional en **todos** los eventos. Solo auditoría y diagnóstico: **ningún consumidor lo lee**; si un dato hace falta, va a `data` (patch). Máximo **16 KB** serializado; si se pasa, `payload` se omite y `truncated: true`. Saneado antes de publicar. |
 
 Saneado de `raw` (lista cerrada por proveedor, en el productor):
@@ -269,7 +236,7 @@ Se responde 200 al proveedor, se **descarta con log en debug** y no se publica (
 | Stripe | todos los demás (`customer.*`, `invoice.created`, `payment_intent.*`, ...) | El api solo necesita factura pagada o fallida y el ciclo de la suscripción. |
 | Auth0 | `s` (login ok), `slo`, `sv`, `scp`, `scpr`, `sce`, `sapi`, `fapi`, `fs` | Volumen alto o ruido; el api ya sincroniza el usuario en cada request autenticado (`account.user.sync.requested`). |
 | Auth0 | `f`, `fp`, `fu` (login fallido), `limit_wc` (usuario bloqueado) | Fuera del catálogo por ahora; entran (patch) cuando haya consumidor de alertas de seguridad. |
-| Auth0 | eventos de Actions no registrados (incluido `user_login` del post-login) | Se agregan al enum cuando exista un Action con consumidor. |
+| Auth0 | eventos de Actions no registrados (incluido `user_login` del post-login) | Se agregan al catálogo cuando exista un Action con consumidor. |
 | AliExpress | 1 a 12, 20, 41 | Mensajes de pedidos del lado vendedor; Merkaly es comprador DS y solo usa 53 (pedido) y 61 (producto). |
 | AliExpress | 0 (`test_push`) | Botón de prueba de la consola, solo se loguea. |
 
@@ -277,7 +244,7 @@ Se responde 200 al proveedor, se **descarta con log en debug** y no se publica (
 
 | Regla | Detalle |
 | --- | --- |
-| Patrón | `type` es el patrón de Nest RMQ (`{ pattern, data }`) y la routing key. El consumidor usa `@OnMerkalyEvent(MerkalyEventType.PAYMENT_CONFIRMED)`. |
+| Patrón | `type` es el patrón de Nest RMQ (`{ pattern, data }`) y la routing key. El consumidor usa `@OnMerkalyEvent('payment.confirmed')`. |
 | Exchange | `merkaly.events`, topic. El productor publica ahí con `type` como routing key y **nunca nombra una cola**. Decidido el 2026-11-02: con cola directa el productor quedaba acoplado al consumidor. |
 | Cola por consumidor | Con el nombre del repo que consume (`api.merkaly.io`, después `payments.merkaly.io`). La declara el consumidor y Nest la liga a cada tipo con handler; un consumidor nuevo no toca al productor. Sin consumidor ligado, el exchange descarta el mensaje: el consumidor tiene que haber arrancado al menos una vez. |
 | Dead letter | `<cola>.dlq`, vía `x-dead-letter-exchange` de la cola principal. |
@@ -291,7 +258,7 @@ Se responde 200 al proveedor, se **descarta con log en debug** y no se publica (
 
 | Cambio | Release del paquete | `version` del evento |
 | --- | --- | --- |
-| Tipo de evento nuevo (enum + entrada en `EventDataMap`) | patch | igual |
+| Tipo de evento nuevo | ninguno (no toca el paquete) | se documenta en el catálogo |
 | Campo opcional nuevo en `data` | patch | igual |
 | Quitar o renombrar un campo, cambiar tipo o significado | minor | +1 (`PaymentConfirmedV1` y `V2` conviven) |
 | Quitar un tipo | minor, tras `@deprecated` y la ventana | n/a |
@@ -316,6 +283,7 @@ pierde).
 | 3 | infra | n/a | Borrar la cola vieja `api.merkaly.io-queue` (mensajes crudos sin consumidor). La cola nueva la crea el api al arrancar. |
 | 4 | api | patch | Consumidor de `payment.*` y `payment.account.*` en la cola `api.merkaly.io`. El endpoint del store lee solo Mongo y el checkout sigue el cobro por SSE; queda una relectura lenta en Asaas como red de seguridad si no llega el evento. |
 | 5 | nest + webhooks + api | patch | Resto del catálogo por proveedor: AliExpress (`supplier.*`, con `aliexpressSellerId` e índice), Stripe (`subscription.*`, mover el webhook del api), Auth0 (`identity.*`). |
+| 7 | nest + webhooks + api | minor (0.3.0) | Se quitan `MerkalyEventType` y `EventDataMap`: `type` pasa a string y `MerkalyEvent<T>` a genérico. Productores y consumidores usan los strings del catálogo. |
 | 6 | payments | fuera de alcance | `payments.merkaly.io` declara su cola ligada a lo que necesite; publica su resultado con `producer: payments.merkaly.io`. |
 
 ## 8. Decisiones
@@ -324,12 +292,12 @@ pierde).
 | --- | --- |
 | Nombres | `<dominio>.<entidad>.<hecho>`, segmentos con punto (`supplier.order.status_changed`). |
 | `payment.confirmed` y `payment.received` | Separados. |
-| Eventos no traducidos | Se descartan con log en debug; sin `webhook.unmapped`. |
+| Eventos no traducidos | Webhooks responde 200 y deja la línea en warn (`no listener declared for this event`); sin `webhook.unmapped`. |
 | Organización en AliExpress | `aliexpressSellerId` en la metadata de la organización en Auth0 (fuente de verdad) + índice en memoria `sellerId -> organización` en el api (Auth0 no busca por metadata). Desconocido: refresco y luego `.dlq`. A escala: colección global en Mongo. |
 | `supplier.product.removed` | Sin organización; el api recorre las tiendas. A futuro: índice inverso. |
 | `supplier.product.updated` | Igual que `removed`: global. `id` determinista `aliexpress:61:<item_id>:<event_time_stamps>`; `update_event` como string libre. |
 | Auth0 login fallido y bloqueo | Fuera del catálogo por ahora. |
 | Stripe sin `AUTH0_ORG_ID` | 200, log de error, no se publica. |
-| Tipado | `data: EventDataMap[K]`, `emit(type, data)` y handlers tipados; `raw` opcional en todos, `unknown`, 16 KB, saneado, nunca leído por consumidores. |
+| Tipado | `type` string del catálogo, `data` genérico (`MerkalyEvent<T>`, `emit<T>(type, data)`); el handler declara la forma que espera. `raw` opcional en todos, `unknown`, 16 KB, saneado, nunca leído por consumidores. |
 | Routing | Exchange topic `merkaly.events` desde ya (2026-11-02); cola por consumidor con el nombre de su repo. |
 | Cola sin consumir | 7 días / 10.000 mensajes. |

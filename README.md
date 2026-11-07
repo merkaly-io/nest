@@ -44,7 +44,7 @@ import {
   AbstractExceptionFilter, ExceptionsFilter, rememberError, // filtros (motivo do erro para o log)
   RabbitModule, EventsPublisher, EventsConsumer, EventRejectedException, // eventos
   rabbitConsumerOptions, assertConsumerTopology, OnMerkalyEvent,
-  MerkalyEvent, MerkalyEventType, MerkalyProducer, EventDataMap, createMerkalyEvent, AliexpressOrderStatus,
+  MerkalyEvent, MerkalyProducer, createMerkalyEvent, AliexpressOrderStatus,
   SignatureGuard, safeCompare, hmacDigest, verifyHmac,
 } from '@merkaly/nest';
 ```
@@ -126,6 +126,8 @@ Grupos (o primeiro segmento do tipo):
 | `identity.*` | identidade: `identity.signup.requested` (usuário novo sem organização preenche o formulário da empresa no Action post-login; o api cria a organização com ele como membro) | Auth0 |
 | `supplier.*` | produto do fornecedor: `supplier.product.updated` (mensagem 61 do AliExpress, ex. sem estoque); pedido do fornecedor: `supplier.order.status_changed` (mensagem 53) | AliExpress |
 
+Desde 0.3.0 o `type` de um evento é uma string do catálogo (`docs/events.md`) e `MerkalyEvent<T>` é genérico em `data`: não existem mais `MerkalyEventType` nem `EventDataMap`, e um evento novo não exige publicar o pacote. As interfaces de `data` (`PaymentRef`, `SupplierOrderStatusChanged`...) continuam exportadas para quem quiser tipar o handler.
+
 Os eventos `payment.*` de cobrança levam `PaymentRef`: `provider`, `paymentId`, `saleId`, `method`, `amount` e `netAmount` (centavos) e, desde 0.2.9, os opcionais `providerEvent` (ex. `PAYMENT_RECEIVED`), `providerStatus`, `walletId` (subconta do split) e `externalReference` (sem tocar), para diagnóstico sem ler `raw`.
 
 `identity.signup.requested` leva `data: { user, email, company: { name, email? } }` (id do usuário no Auth0, ex. `auth0|abc`); o momento é o `occurredAt` do evento, sem campo próprio.
@@ -135,8 +137,8 @@ Os eventos `payment.*` de cobrança levam `PaymentRef`: `provider`, `paymentId`,
 `supplier.order.status_changed` (desde 0.2.11) leva `data: { provider: 'aliexpress', sellerId, externalOrderId, reference, providerStatus, status? }`: `sellerId` é o `seller_id` da conta AliExpress do comerciante (o api resolve a organização por ele), `externalOrderId` é o id do pedido DS como string, `providerStatus` é o `orderStatus` sem tocar e `status` é o estado grosso (omitido quando ambíguo, ex. `OrderClosed`). O api relê o pedido no AliExpress em vez de confiar no push.
 
 ```ts
-// produtor: data tipado pelo tipo; resolve com o evento ou ServiceUnavailableException (o provedor reintenta)
-await this.events.emit(MerkalyEventType.PAYMENT_RECEIVED, { ...paymentRef, receivedAt }, {
+// produtor: o tipo é uma string do catálogo (docs/events.md); resolve com o evento ou ServiceUnavailableException (o provedor reintenta)
+await this.events.emit('payment.received', { ...paymentRef, receivedAt }, {
   id: `asaas:${body.id}`, source: 'asaas', organization, occurredAt, raw: { type: body.event, payload },
 });
 ```
@@ -160,8 +162,8 @@ RabbitModule.forConsumerAsync({
 });
 
 // handler
-@OnMerkalyEvent(MerkalyEventType.PAYMENT_RECEIVED)
-received(@Payload() event: MerkalyEvent<MerkalyEventType.PAYMENT_RECEIVED>, @Ctx() context: RmqContext) {
+@OnMerkalyEvent('payment.received')
+received(@Payload() event: MerkalyEvent<PaymentRef & { receivedAt: string }>, @Ctx() context: RmqContext) {
   return this.consumer.handle(event, context, (e) => this.payments.refresh(e.data.saleId));
 }
 ```

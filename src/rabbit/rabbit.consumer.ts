@@ -1,6 +1,5 @@
 import { EventPattern, RmqOptions, Transport } from '@nestjs/microservices';
 import { connect } from 'amqplib';
-import { MerkalyEventType } from '../events';
 import { DEFAULT_RETRY_DELAY, MERKALY_EXCHANGE, RabbitConsumerOptions } from './rabbit.options';
 
 const WEEK = 7 * 24 * 60 * 60 * 1000;
@@ -55,4 +54,4 @@ export async function assertConsumerTopology(options: RabbitConsumerOptions) {
 }
 
 // One handler can take several types (stacked @EventPattern would overwrite each other)
-export const OnMerkalyEvent = (...types: MerkalyEventType[]) => EventPattern(types, Transport.RMQ);
+export const OnMerkalyEvent = (...types: string[]) => EventPattern(types, Transport.RMQ);
