@@ -218,14 +218,15 @@ La organización sale de `metadata.AUTH0_ORG_ID` (la escribe el api en customer 
 | `identity.user.signed_up` | no | `{ userId: string; email: string \| null; connection: string \| null }` | log `ss` | Nada hoy: el onboarding (crear organización) sigue síncrono vía Action a `POST /auth0/onboarding`, porque el Action espera la respuesta. |
 | `identity.user.deleted` | no | `{ userId: string }` | log `du` | Marcar el `AccountUser` inactivo en las organizaciones donde exista. |
 | `identity.signup.requested` | no | `{ user: string; email: string; company: { name: string; email?: string } }` | Action post-login (formulario de empresa) | Crear la organización en Auth0 con el usuario como miembro (self-service signup). Implementado en 0.2.8. |
-| `identity.organization.member.added` | sí | `{ user: string }` | Event Streams `organization.member.added` | Guardar el miembro en el caché del equipo (`AccountUser`), con su rol leído de Auth0. |
-| `identity.organization.member.removed` | sí | `{ user: string }` | Event Streams `organization.member.deleted` | Marcar el `AccountUser` como `disabled` (no se borra). |
-| `identity.organization.member.role.assigned` | sí | `{ user: string; role: string }` (nombre del rol, `ORG_ADMIN`) | Event Streams `organization.member.role.assigned` | Guardar el rol en el caché. |
-| `identity.organization.member.role.removed` | sí | `{ user: string; role: string }` | Event Streams `organization.member.role.deleted` | Quitar el rol del caché si es el que tenía. |
+| `identity.organization.member.added` | sí | `data.object` de Auth0 tal cual: `{ organization: { id: string; name?: string }; user: { user_id: string } }` | Event Streams `organization.member.added` | Guardar el miembro en el caché del equipo (`AccountUser`), con su rol leído de Auth0. |
+| `identity.organization.member.removed` | sí | igual que `member.added` | Event Streams `organization.member.deleted` | Marcar el `AccountUser` como `disabled` (no se borra). |
+| `identity.organization.member.role.assigned` | sí | igual que `member.added` + `role: { id: string; name: string }` (`name` = `ORG_ADMIN`...) | Event Streams `organization.member.role.assigned` | Guardar el rol en el caché. |
+| `identity.organization.member.role.removed` | sí | igual que `role.assigned` | Event Streams `organization.member.role.deleted` | Quitar el rol del caché si es el que tenía. |
 
 `organization` se completa cuando el log trae `organization_id`, pero no es obligatoria: en signup y
 borrado el usuario no pertenece a una organización en ese momento.
-En los `identity.organization.member.*` sí es obligatoria: sale de `data.object.organization.id`.
+En los `identity.organization.member.*` sí es obligatoria: sale de `data.object.organization.id`. Su `data` es el
+`data.object` de Auth0 sin traducir (fuente confiable, schema oficial de Event Streams).
 
 ### Lo que NO se traduce
 
