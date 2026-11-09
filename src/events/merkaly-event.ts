@@ -91,6 +91,11 @@ export interface MerkalyEvent<T = unknown> {
   raw?: MerkalyRawEvent;
 }
 
+// Request-reply over merkaly.requests: same envelope plus the moment the caller stops waiting
+export interface MerkalyRequest<T = unknown> extends MerkalyEvent<T> {
+  expiresAt: string; // ISO, after it the consumer drops the request unanswered
+}
+
 export interface MerkalyEventMeta {
   id?: string; // default: random UUID
   version?: number; // default 1

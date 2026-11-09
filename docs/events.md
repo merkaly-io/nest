@@ -1,6 +1,6 @@
 # Contrato de eventos entre servicios
 
-Estado: **aprobado por el Founder; tipos de pagos y subconta implementados en `@merkaly/nest` 0.2.0 (campos de diagnóstico de `PaymentRef` en 0.2.9)** (exchange decidido el 2026-11-02). El resto del catálogo entra por proveedor.
+Estado: **aprobado por el Founder; tipos de pagos y subconta implementados en `@merkaly/nest` 0.2.0 (campos de diagnóstico de `PaymentRef` en 0.2.9, request-reply en 0.3.1)** (exchange decidido el 2026-11-02). El resto del catálogo entra por proveedor.
 
 Antes, `webhooks.merkaly.io` publicaba en `api.merkaly.io-queue` el evento crudo de cada proveedor
 (`asaas.payment_received`, `stripe.invoice.paid`...) con el sobre `WebhookEvent`, que en 0.2.0 se
@@ -307,3 +307,24 @@ pierde).
 | Tipado | `type` string del catálogo, `data` genérico (`MerkalyEvent<T>`, `emit<T>(type, data)`); el handler declara la forma que espera. `raw` opcional en todos, `unknown`, 16 KB, saneado, nunca leído por consumidores. |
 | Routing | Exchange topic `merkaly.events` desde ya (2026-11-02); cola por consumidor con el nombre de su repo. |
 | Cola sin consumir | 7 días / 10.000 mensajes. |
+
+## 9. Request-reply
+
+Para quien necesita una respuesta en el momento (el proveedor espera el body). Primer caso:
+`payment.withdrawal.authorize` (webhooks pregunta al api si aprueba un saque de Asaas).
+
+| Regla | Detalle |
+| --- | --- |
+| Exchange | `merkaly.requests`, topic, routing key = tipo. Separado de `merkaly.events`: la cola de eventos del api está ligada a `#` y se llevaría los pedidos. |
+| Cola | `<cola>.requests` (`api.merkaly.io.requests`), no durable, `noAck`, sin `.retry` ni `.dlq`, `x-message-ttl` 30 s, `x-max-length` 1.000 con `drop-head`. La declara quien responde con `rabbitRequestsOptions`. |
+| Respuesta | Direct reply-to (`amq.rabbitmq.reply-to`) del `ClientProxy.send` de Nest, con `correlationId`. Sin cola de respuesta. |
+| Sobre | `MerkalyRequest<T>` = `MerkalyEvent<T>` + `expiresAt` (ISO, ahora + timeout). El mensaje lleva `expiration` = timeout y no es persistente. |
+| Vencido | El broker lo descarta en la cola; si igual llega, el consumidor lo descarta sin correr el handler (`WARN expired, dropped`), sin responder. |
+| Timeout | `request(type, data, { timeout })`, 5 s por defecto. Sin respuesta: `GatewayTimeoutException`; handler con error o broker sin configurar: `ServiceUnavailableException`. Quien pregunta decide el fallback (webhooks responde `REFUSED`). |
+| Sin consumidor | Si nadie ligó el tipo, el exchange descarta el pedido y quien pregunta recibe el timeout. |
+| Aislamiento | `@OnMerkalyRequest` usa el transport id `Symbol.for('merkaly.requests')`: el servidor de eventos no liga esos tipos y el de pedidos no ve los `@OnMerkalyEvent`. Un evento con el mismo nombre que un pedido va solo al handler de eventos. |
+| Contexto | El handler corre fuera del contexto del app (sin CLS, guards ni interceptors globales); abre el suyo si lo necesita. |
+
+| Tipo | Quién pregunta | Quién responde | `data` | Respuesta |
+| --- | --- | --- | --- | --- |
+| `payment.withdrawal.authorize` | webhooks (`POST /asaas/withdrawals`) | api | `{ transfer: { id, value, externalReference, operationType } }` (`value` en reais, como lo manda Asaas; nunca la clave Pix) | `{ status: 'APPROVED' }` o `{ status: 'REFUSED', refuseReason }` |
