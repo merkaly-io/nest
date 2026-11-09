@@ -94,7 +94,7 @@ export function rabbitRequestsOptions(options: RabbitRequestsOptions): CustomStr
       wildcards: true, // binds one routing key per @OnMerkalyRequest
       noAck: true, // a lost request times out at the caller, never retried
       queueOptions: {
-        durable: false, // nothing worth keeping across a broker restart
+        durable: true, // RabbitMQ 4 refuses transient non-exclusive queues; messages still expire in 30 s
         arguments: {
           'x-message-ttl': REQUESTS_QUEUE_TTL,
           'x-max-length': 1000,

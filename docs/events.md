@@ -316,7 +316,7 @@ Para quien necesita una respuesta en el momento (el proveedor espera el body). P
 | Regla | Detalle |
 | --- | --- |
 | Exchange | `merkaly.requests`, topic, routing key = tipo. Separado de `merkaly.events`: la cola de eventos del api está ligada a `#` y se llevaría los pedidos. |
-| Cola | `<cola>.requests` (`api.merkaly.io.requests`), no durable, `noAck`, sin `.retry` ni `.dlq`, `x-message-ttl` 30 s, `x-max-length` 1.000 con `drop-head`. La declara quien responde con `rabbitRequestsOptions`. |
+| Cola | `<cola>.requests` (`api.merkaly.io.requests`), durable (RabbitMQ 4 rechaza colas transitorias no exclusivas), `noAck`, sin `.retry` ni `.dlq`, `x-message-ttl` 30 s, `x-max-length` 1.000 con `drop-head`. La declara quien responde con `rabbitRequestsOptions`. |
 | Respuesta | Direct reply-to (`amq.rabbitmq.reply-to`) del `ClientProxy.send` de Nest, con `correlationId`. Sin cola de respuesta. |
 | Sobre | `MerkalyRequest<T>` = `MerkalyEvent<T>` + `expiresAt` (ISO, ahora + timeout). El mensaje lleva `expiration` = timeout y no es persistente. |
 | Vencido | El broker lo descarta en la cola; si igual llega, el consumidor lo descarta sin correr el handler (`WARN expired, dropped`), sin responder. |
