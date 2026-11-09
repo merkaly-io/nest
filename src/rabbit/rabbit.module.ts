@@ -7,8 +7,10 @@ import {
   EventsConsumerAsyncOptions,
   EventsConsumerOptions,
   MERKALY_EXCHANGE,
+  MERKALY_REQUESTS_EXCHANGE,
   RABBIT_CLIENT,
   RABBIT_OPTIONS,
+  RABBIT_REQUEST_CLIENT,
   RabbitClient,
   RabbitModuleAsyncOptions,
   RabbitModuleOptions,
@@ -34,9 +36,31 @@ export function createRabbitClient(options: RabbitModuleOptions): RabbitClient |
   });
 }
 
+// Requests: own exchange so no events queue (bound to #) ever gets them; replies via direct reply-to
+export function createRabbitRequestClient(options: RabbitModuleOptions): RabbitClient | null {
+  if (!options.url) return null;
+
+  return ClientProxyFactory.create({
+    transport: Transport.RMQ,
+    options: {
+      urls: [options.url],
+      exchange: MERKALY_REQUESTS_EXCHANGE,
+      exchangeType: 'topic',
+      wildcards: true,
+      persistent: false, // worthless after the timeout
+    },
+  }); // replyQueue defaults to amq.rabbitmq.reply-to
+}
+
 const clientProvider: Provider = {
   provide: RABBIT_CLIENT,
   useFactory: createRabbitClient,
+  inject: [RABBIT_OPTIONS],
+};
+
+const requestClientProvider: Provider = {
+  provide: RABBIT_REQUEST_CLIENT,
+  useFactory: createRabbitRequestClient,
   inject: [RABBIT_OPTIONS],
 };
 
@@ -46,7 +70,12 @@ export class RabbitModule {
   static forRoot(options: RabbitModuleOptions): DynamicModule {
     return {
       module: RabbitModule,
-      providers: [{ provide: RABBIT_OPTIONS, useValue: options }, clientProvider, EventsPublisher],
+      providers: [
+        { provide: RABBIT_OPTIONS, useValue: options },
+        clientProvider,
+        requestClientProvider,
+        EventsPublisher,
+      ],
       exports: [EventsPublisher],
     };
   }
@@ -58,6 +87,7 @@ export class RabbitModule {
       providers: [
         { provide: RABBIT_OPTIONS, useFactory: options.useFactory, inject: options.inject ?? [] },
         clientProvider,
+        requestClientProvider,
         EventsPublisher,
       ],
       exports: [EventsPublisher],

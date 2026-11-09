@@ -44,6 +44,7 @@ import {
   AbstractExceptionFilter, ExceptionsFilter, rememberError, // filtros (motivo do erro para o log)
   RabbitModule, EventsPublisher, EventsConsumer, EventRejectedException, // eventos
   rabbitConsumerOptions, assertConsumerTopology, OnMerkalyEvent,
+  rabbitRequestsOptions, OnMerkalyRequest, MerkalyRequest, // request-reply
   MerkalyEvent, MerkalyProducer, createMerkalyEvent, AliexpressOrderStatus,
   SignatureGuard, safeCompare, hmacDigest, verifyHmac,
 } from '@merkaly/nest';
@@ -178,6 +179,31 @@ received(@Payload() event: MerkalyEvent<PaymentRef & { receivedAt: string }>, @C
 | Malformado ou `version` maior que a do handler | `<fila>.dlq` direto. |
 
 A fila principal descarta para a `.dlq` o que ficar 7 dias sem consumo ou passar de 10.000 mensagens.
+
+### Request-reply (síncrono)
+
+Para quem precisa de uma resposta na hora (ex. webhooks responde ao Asaas se um saque é aprovado). Detalhes em [`docs/events.md`](docs/events.md#9-request-reply).
+
+```ts
+// quem pergunta: resolve com o retorno do handler; GatewayTimeoutException sem resposta no prazo,
+// ServiceUnavailableException se o handler falhou ou o broker não está configurado
+const answer = await this.events.request<Req, Res>('payment.withdrawal.authorize', data, { timeout: 3000 });
+
+// main.ts de quem responde, ao lado de rabbitConsumerOptions (mesmo { url, queue })
+app.connectMicroservice(rabbitRequestsOptions({ ...consumer, logger: app.get(LoggerService) }));
+
+// handler (controller): o retorno é a resposta
+@OnMerkalyRequest('payment.withdrawal.authorize')
+authorize(@Payload() request: MerkalyRequest<Req>): Promise<Res> { ... }
+```
+
+- Exchange próprio `merkaly.requests` (topic), nunca o `merkaly.events`: a fila de eventos, ligada a `#`, não recebe pedidos.
+- Fila `<fila>.requests` não durável, sem `.retry` nem `.dlq`, `noAck`, TTL 30 s. Um pedido perdido vira timeout em quem perguntou.
+- Resposta via direct reply-to (`amq.rabbitmq.reply-to`), sem fila de resposta.
+- O sobre leva `expiresAt` (agora + timeout) e a mensagem `expiration` = timeout: vencido, o broker descarta na fila e o consumidor descarta sem rodar o handler (`WARN expired, dropped`).
+- `@OnMerkalyRequest` usa um transport id próprio: o servidor de eventos não liga esses tipos e o de pedidos não vê os `@OnMerkalyEvent`.
+- Uma linha por pedido em quem responde (`REQUEST:: <tipo> (<id>) ok 12ms`, `ORIGIN` = quem perguntou, `SCOPE` = organização). Dentro de um request HTTP, quem pergunta soma `=> <tipo> 12ms` à linha do request.
+- O handler roda fora do contexto do app (sem CLS, guards nem interceptors globais): abre o próprio (`cls.run`) se precisar.
 
 ### Env
 
