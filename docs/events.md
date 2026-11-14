@@ -222,11 +222,16 @@ La organización sale de `metadata.AUTH0_ORG_ID` (la escribe el api en customer 
 | `identity.organization.member.removed` | sí | igual que `member.added` | Event Streams `organization.member.deleted` | Marcar el `AccountUser` como `disabled` (no se borra). |
 | `identity.organization.member.role.assigned` | sí | igual que `member.added` + `role: { id: string; name: string }` (`name` = `ORG_ADMIN`...) | Event Streams `organization.member.role.assigned` | Guardar el rol en el caché. |
 | `identity.organization.member.role.removed` | sí | igual que `role.assigned` | Event Streams `organization.member.role.deleted` | Quitar el rol del caché si es el que tenía. |
+| `identity.organization.created` | sí | `data.object` de Auth0 tal cual: `{ id: string; name?: string; display_name?: string; metadata?: Record<string, string> }` | Event Streams `organization.created` | Releer la organización y sus discovery domains y sumarla al mapa de tiendas por host (`TenantService`). |
+| `identity.organization.updated` | sí | igual que `organization.created` | Event Streams `organization.updated` | Igual que `created` (nombre, metadata y dominios actuales). |
+| `identity.organization.deleted` | sí | igual que `organization.created` | Event Streams `organization.deleted` | Quitarla del mapa de tiendas. |
 
 `organization` se completa cuando el log trae `organization_id`, pero no es obligatoria: en signup y
 borrado el usuario no pertenece a una organización en ese momento.
 En los `identity.organization.member.*` sí es obligatoria: sale de `data.object.organization.id`. Su `data` es el
 `data.object` de Auth0 sin traducir (fuente confiable, schema oficial de Event Streams).
+En `identity.organization.created|updated|deleted` sale de `data.object.id`. Auth0 no emite eventos
+de discovery domains: el api los relee al recibir `created`/`updated` y en un refresco completo cada hora.
 
 ### Lo que NO se traduce
 
