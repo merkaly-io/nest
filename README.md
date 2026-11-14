@@ -92,7 +92,16 @@ Error: boom
 - **ORIGIN** (24): quem fez o request, nas linhas de request e nos logs internos emitidos durante ele: `x-merkaly-host`, senão o host do `Origin`, `cf-connecting-ip`, o primeiro `x-forwarded-for` ou o socket (`requestOrigin`). Fora de um request, o `service`.
 - **SCOPE** (22): contexto de negócio definido pelo app (`requestLogger({ scope })` ou `LoggerModule({ scope })`, ex.: id da organização). Nas linhas de request é resolvido ao terminar a resposta, então pega o que os guards definiram.
 - **KIND::** abre a descrição, sem largura fixa (nunca é cortado): método HTTP nas linhas de request; nos logs internos, o `group` de quem loga. Com `requestLogger({ kind })` a linha de request usa esse valor (ex.: o evento do webhook) e o método passa para a descrição: `PAYMENT_RECEIVED:: POST /asaas 200 44ms`.
-- **MESSAGE**: `/path STATUS Nms "motivo"` (motivo cortado em 200, sem query, body nem headers) ou o texto. Nível: `ERROR` em 5xx com o stack embaixo, `WARN` em 4xx, `LOG` no resto.
+- **MESSAGE**: `/path STATUS Nms "motivo"` (motivo cortado em 200, sem query, body nem headers) ou o texto. Nível: `ERROR` em 5xx com o stack embaixo, `WARN` em 4xx, `LOG` no resto, `DEBUG` em 404 sem rota (scanners e bots).
+
+**Nível mínimo** (`LOG_LEVEL`): imprime o nível escolhido e os mais graves, na ordem do Nest `verbose < debug < log < warn < error`. Padrão `log` em produção (`NODE_ENV=production`, sem `DEBUG` nem `VERBOSE`) e `debug` fora dela. Valor inválido não derruba o boot: usa o padrão e avisa com um `WARN`. Vale também para as linhas do `requestLogger` (o 404 de scanner some em produção) e do RabbitMQ.
+
+```bash
+LOG_LEVEL=debug   # diagnóstico temporário em produção
+LOG_LEVEL=warn    # só WARN e ERROR
+```
+
+**Saída**: `ERROR` e stacks vão para stderr (`console.error`), `WARN` para `console.warn` (stderr) e o resto para stdout. Cor só com TTY (detectada pelo `chalk`), então os logs do Railway saem sem ANSI; `FORCE_COLOR=1` força a cor e `FORCE_COLOR=0` a desliga.
 
 ```ts
 // main.ts
