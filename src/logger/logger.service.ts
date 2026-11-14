@@ -1,9 +1,29 @@
 import { Inject, Injectable, LogLevel, Optional } from '@nestjs/common';
 import Chalk from 'chalk';
+import { env } from '../config';
 import { LOGGER_OPTIONS, LoggerModuleOptions, LoggingOptions, RequestLine } from './logger.options';
 import { requestContext } from './request-context';
 
-const chalk = new Chalk.Instance({ level: 3 }); // own instance, global chalk untouched
+const chalk = new Chalk.Instance(); // own instance; color only on a TTY or with FORCE_COLOR
+
+const LEVELS: LogLevel[] = ['verbose', 'debug', 'log', 'warn', 'error', 'fatal']; // Nest order, least severe first
+
+const STREAMS: Partial<Record<LogLevel, (line: string) => void>> = {
+  error: console.error, // stderr
+  fatal: console.error,
+  warn: console.warn,
+};
+
+// LOG_LEVEL prints that level and above; default `log` in production, `debug` outside
+const minimumLevel = () => {
+  const fallback: LogLevel = env.isProduction ? 'log' : 'debug';
+  const value = env.string('LOG_LEVEL')?.trim().toLowerCase();
+
+  if (value === undefined || LEVELS.includes(value as LogLevel))
+    return { level: (value ?? fallback) as LogLevel };
+
+  return { level: fallback, invalid: value }; // never fails boot over the log level
+};
 
 const levelColors: Partial<Record<LogLevel, Chalk.Chalk>> = {
   log: chalk.blueBright,
@@ -24,15 +44,30 @@ const fit = (value: string | undefined, width: number) => {
 // `LEVEL ORIGIN SCOPE KIND:: MESSAGE`, fixed widths, `-` when missing; KIND opens the description, never cut
 @Injectable()
 export class LoggerService {
-  constructor(@Optional() @Inject(LOGGER_OPTIONS) private readonly options?: LoggerModuleOptions) {}
+  private readonly minimum: number;
+
+  constructor(@Optional() @Inject(LOGGER_OPTIONS) private readonly options?: LoggerModuleOptions) {
+    const { level, invalid } = minimumLevel();
+
+    this.minimum = LEVELS.indexOf(level);
+
+    if (invalid)
+      this.warn({
+        group: 'LoggerService',
+        message: `LOG_LEVEL "${invalid}" is not a level, using ${level}`,
+      });
+  }
+
+  public isLevelEnabled(level: LogLevel) {
+    return LEVELS.indexOf(level) >= this.minimum;
+  }
 
   public log(options: LoggingOptions) {
     this.print('log', options.group, options.message);
   }
 
   public error(options: LoggingOptions & { trace?: unknown }) {
-    this.print('error', options.group, options.message);
-    this.trace(options.trace);
+    if (this.print('error', options.group, options.message)) this.trace(options.trace);
   }
 
   public warn(options: LoggingOptions) {
@@ -49,8 +84,7 @@ export class LoggerService {
 
   // Request line from requestLogger: KIND = method, MESSAGE = `/path STATUS Nms "reason"`
   public request(tier: LogLevel, { method, message, trace }: RequestLine) {
-    this.print(tier, method, message);
-    this.trace(trace);
+    if (this.print(tier, method, message)) this.trace(trace); // no stack under a filtered line
   }
 
   private trace(trace?: unknown) {
@@ -58,6 +92,8 @@ export class LoggerService {
   }
 
   private print(tier: LogLevel, kind: string, message: string) {
+    if (!this.isLevelEnabled(tier)) return false;
+
     const color = levelColors[tier] ?? ((txt: string) => txt);
     const timestamps = this.options?.timestamps ?? process.env.NODE_ENV !== 'production';
     const context = requestContext.getStore();
@@ -74,7 +110,9 @@ export class LoggerService {
       kind ? `${chalk.hex('#FFA500')(`${kind}::`)} ${message}` : message,
     );
 
-    return console.log(output.join(' '));
+    (STREAMS[tier] ?? console.log)(output.join(' '));
+
+    return true;
   }
 
   private currentTime() {
