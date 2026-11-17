@@ -46,7 +46,7 @@ import {
   rabbitConsumerOptions, assertConsumerTopology, OnMerkalyEvent,
   rabbitRequestsOptions, OnMerkalyRequest, MerkalyRequest, // request-reply
   MerkalyEvent, MerkalyProducer, createMerkalyEvent, AliexpressOrderStatus,
-  SignatureGuard, safeCompare, hmacDigest, verifyHmac,
+  safeCompare, hmacDigest, verifyHmac, // assinaturas
 } from '@merkaly/nest';
 ```
 
@@ -220,7 +220,7 @@ authorize(@Payload() request: MerkalyRequest<Req>): Promise<Res> { ... }
 
 ### Assinaturas
 
-`safeCompare` (timing-safe, vazio nunca bate), `hmacDigest`/`verifyHmac` (sha256 hex por padrão) e `SignatureGuard` abstrato (exige `NestFactory.create(AppModule, { rawBody: true })`).
+`safeCompare` (timing-safe, vazio nunca bate), `hmacDigest`/`verifyHmac` (sha256 hex por padrão). O guard de cada webhook vive no app (`AppGuard` do webhooks).
 
 ## Desenvolvimento
 
