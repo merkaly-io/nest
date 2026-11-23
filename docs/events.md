@@ -132,6 +132,22 @@ interface PaymentRef {
 Los cuatro campos de 0.2.9 son opcionales (patch): sirven para logs, diagnóstico y para no leer
 `raw`. El api no decide con ellos: relee el pago en Asaas (el evento es un disparador).
 
+### Notificación del proveedor de pagos (webhooks → payments)
+
+Desde que `payments.merkaly.io` es el único que habla con el proveedor de pagos, webhooks ya no
+traduce los eventos de Asaas: verifica el token y publica el cuerpo filtrado por una lista blanca.
+payments lo traduce y publica los `payment.*`, `payment.account.*` y `payment.transfer.*` de abajo
+con `producer: payments.merkaly.io`, mismos tipos, `data` e ids (`asaas:<evt_...>`). Contrato
+completo: repo payments, `docs/contract.md`.
+
+| Tipo | Org | `data` | Quién consume |
+| --- | --- | --- | --- |
+| `payment.provider.notified` | no siempre (el `?organization=` de los webhooks de subconta; los de cobro la llevan en el `externalReference` y la resuelve payments) | `{ payload: unknown; organization?: string }`, el cuerpo del proveedor sin datos del cliente, tarjeta, clave Pix ni factura | `payments.merkaly.io` (binding `payment.provider.#`) |
+
+Excepción a la regla de `raw`: acá el cuerpo del proveedor va en `data` porque traducirlo es justo
+el trabajo del consumidor. `id` = `asaas:<evt_...>#payment.provider.notified`, para no chocar con
+el id del evento traducido.
+
 ### Pagos del store (Asaas, `/asaas`)
 
 Un solo webhook en la cuenta principal (split 100%): la organización sale del `externalReference` (`<orgId>:<saleId>`). Con `paymentId` el api lee el pago en Asaas y aplica
@@ -295,7 +311,7 @@ pierde).
 | 4 | api | patch | Consumidor de `payment.*` y `payment.account.*` en la cola `api.merkaly.io`. El endpoint del store lee solo Mongo y el checkout sigue el cobro por SSE; queda una relectura lenta en Asaas como red de seguridad si no llega el evento. |
 | 5 | nest + webhooks + api | patch | Resto del catálogo por proveedor: AliExpress (`supplier.*`, con `aliexpressSellerId` e índice), Stripe (`subscription.*`, mover el webhook del api), Auth0 (`identity.*`). |
 | 7 | nest + webhooks + api | minor (0.3.0) | Se quitan `MerkalyEventType` y `EventDataMap`: `type` pasa a string y `MerkalyEvent<T>` a genérico. Productores y consumidores usan los strings del catálogo. |
-| 6 | payments | fuera de alcance | `payments.merkaly.io` declara su cola ligada a lo que necesite; publica su resultado con `producer: payments.merkaly.io`. |
+| 6 | payments + webhooks | n/a (2026-11-22) | `payments.merkaly.io` consume `payment.provider.notified` en su cola y publica los `payment.*` traducidos con `producer: payments.merkaly.io`; webhooks deja de traducir Asaas. Los comandos del api (`payments.*`) y el chequeo de movimientos siguen, un paso por PR (repo payments, `docs/contract.md`). |
 
 ## 8. Decisiones
 
@@ -333,3 +349,19 @@ Para quien necesita una respuesta en el momento (el proveedor espera el body). P
 | Tipo | Quién pregunta | Quién responde | `data` | Respuesta |
 | --- | --- | --- | --- | --- |
 | `payment.withdrawal.authorize` | webhooks (`POST /asaas/withdrawals`) | api | `{ transfer: { id, value, externalReference, operationType } }` (`value` en reais, como lo manda Asaas; nunca la clave Pix) | `{ status: 'APPROVED' }` o `{ status: 'REFUSED', refuseReason }` |
+
+Pedidos que responde `payments.merkaly.io` (aprobados 2026-11-22, se implementan uno por PR). El
+prefijo `payments.` nombra al servicio que responde, para no confundirlos con los que responde el
+api (`payment.withdrawal.authorize`, `payment.refund.authorize`). Tipos de `data` y respuesta en el
+repo payments (`src/types/gateway.types.ts`), sin nombres, estados ni unidades del proveedor.
+
+| Tipo | Quién pregunta | `data` | Respuesta |
+| --- | --- | --- | --- |
+| `payments.account.create` | api | `{ holder }` | `{ account: { id, credentials }, approval }` (`credentials` opacas, cifradas por payments) |
+| `payments.account.approval.read` | api | `{ account }` | aprobación por sección |
+| `payments.account.holder.update` | api | `{ account, holder }` | aprobación por sección |
+| `payments.charge.create` / `.read` / `.search` / `.delete` / `.refund` | api | `{ account, charge }`, `{ chargeId }`, `{ reference }`, `{ chargeId, refund }` | `PaymentCharge` (o lista) |
+| `payments.fees.read` | api | `{}` | `{ pix }` en centavos |
+| `payments.balance.read` | api | `{ account }` | `{ available, pending, nextCreditAt }` |
+| `payments.transfer.create` / `.read` | api | `{ account, transfer }`, `{ account, transferId }` | `PaymentTransfer` |
+| `payments.movement.check` | webhooks (`POST /asaas/withdrawals`) | `{ payload }` | el body que espera el proveedor; payments pregunta al api `payment.withdrawal.authorize` o `payment.refund.authorize` en términos de Merkaly |
