@@ -94,7 +94,7 @@ handle(event: MerkalyEvent<PaymentRef & { confirmedAt: string }>) {
 | `occurredAt` | sí | ISO 8601 UTC del hecho según el proveedor (Asaas `dateCreated`, Stripe `created`, Auth0 `date`, AliExpress `timestamp`). Si falta, igual a `publishedAt`. |
 | `publishedAt` | sí | ISO 8601 UTC del momento de publicar. Reemplaza `receivedAt`. |
 | `correlationId` | no | Id del request HTTP que originó el evento (el del logger); un evento derivado hereda el del padre. Sirve para seguir un flujo en los logs de varios servicios. |
-| `data` | sí | Contrato acordado por tipo (catálogo). Montos en **centavos enteros**, fechas ISO, ids del proveedor como string (los de AliExpress superan 2^53). |
+| `data` | sí | Contrato acordado por tipo (catálogo). Todos los montos de eventos y pedidos van en **centavos enteros** (el productor convierte en la frontera; el valor del proveedor solo en `raw`), fechas ISO, ids del proveedor como string (los de AliExpress superan 2^53). |
 | `raw` | no | Opcional en **todos** los eventos. Solo auditoría y diagnóstico: **ningún consumidor lo lee**; si un dato hace falta, va a `data` (patch). Máximo **16 KB** serializado; si se pasa, `payload` se omite y `truncated: true`. Saneado antes de publicar. |
 
 Saneado de `raw` (lista cerrada por proveedor, en el productor):
@@ -345,10 +345,12 @@ Para quien necesita una respuesta en el momento (el proveedor espera el body). P
 | Sin consumidor | Si nadie ligó el tipo, el exchange descarta el pedido y quien pregunta recibe el timeout. |
 | Aislamiento | `@OnMerkalyRequest` usa el transport id `Symbol.for('merkaly.requests')`: el servidor de eventos no liga esos tipos y el de pedidos no ve los `@OnMerkalyEvent`. Un evento con el mismo nombre que un pedido va solo al handler de eventos. |
 | Contexto | El handler corre fuera del contexto del app (sin CLS, guards ni interceptors globales); abre el suyo si lo necesita. |
+| Montos | Como en los eventos: `data` en centavos enteros; el valor crudo del proveedor solo en `raw`. |
 
 | Tipo | Quién pregunta | Quién responde | `data` | Respuesta |
 | --- | --- | --- | --- | --- |
-| `payment.withdrawal.authorize` | webhooks (`POST /asaas/withdrawals`) | api | `{ transfer: { id, value, externalReference, operationType } }` (`value` en reais, como lo manda Asaas; nunca la clave Pix) | `{ status: 'APPROVED' }` o `{ status: 'REFUSED', refuseReason }` |
+| `payment.withdrawal.authorize` | webhooks (`POST /asaas/withdrawals`) | api | `{ transfer: { id, amount, externalReference, operationType } }` (`amount` en centavos enteros, el `value` en reais de Asaas solo en `raw`; nunca la clave Pix) | `{ status: 'APPROVED' }` o `{ status: 'REFUSED', refuseReason }` |
+| `payment.refund.authorize` | webhooks (`POST /asaas/withdrawals`) | api | `{ refund: { id, payment, amount } }` (`amount` en centavos, `payment` = cobro devuelto) | `{ status: 'APPROVED' }` o `{ status: 'REFUSED', refuseReason }` |
 
 Pedidos que responde `payments.merkaly.io` (aprobados 2026-11-22, se implementan uno por PR). El
 prefijo `payments.` nombra al servicio que responde, para no confundirlos con los que responde el
