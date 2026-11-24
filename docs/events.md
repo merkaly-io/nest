@@ -38,6 +38,7 @@ emite el string y el consumidor lo escucha, documentándolo en el catálogo.
 | --- | --- |
 | Forma | `<dominio>.<entidad>.<hecho>` o `<dominio>.<hecho>` cuando la entidad es el propio dominio. Segmentos separados por punto, en minúsculas, en inglés. |
 | Hecho | En pasado; si necesita dos palabras, snake_case (`status_changed`, `signed_up`). |
+| Comando | Cuando el mensaje pide una acción (sin respuesta, con `.retry` y `.dlq`): `<entidad>.<verbo>` en presente, **sin el servicio**: el mensaje dice qué hacer, no quién lo hace (`email.send`). Distinto de los pedidos request-reply, que llevan el prefijo del servicio que responde (`payments.*`). |
 | Patrón | El string del tipo es el patrón de Nest RMQ y la routing key. |
 
 ## 3. Sobre (envelope) y tipado
@@ -249,6 +250,22 @@ En los `identity.organization.member.*` sí es obligatoria: sale de `data.object
 En `identity.organization.created|updated|deleted` sale de `data.object.id`. Auth0 no emite eventos
 de discovery domains: el api los relee al recibir `created`/`updated` y en un refresco completo cada hora.
 
+### Comandos de notificación (api → signals)
+
+El api pide un envío y sigue: no espera respuesta (no es request-reply). Mismo exchange y sobre que
+los eventos; el `type` es un comando (sección 2). `signals.merkaly.io` los consume con **una cola por
+canal**; hoy solo email. `id` = clave de idempotencia: el productor usa un id estable por envío (p. ej.
+el id de la notificación en su base) para que un reenvío no mande dos emails. `organization` va en el
+sobre cuando el envío es de una tienda.
+
+| Tipo | Org | `data` | Cola | Qué hace el consumidor |
+| --- | --- | --- | --- | --- |
+| `email.send` | según el envío | `{ to: string \| string[]; cc?: string \| string[]; subject: string; text: string }` (`text` en texto plano, se escapa en la parte html) | `signals.merkaly.io-emails` | Envía con el transporte de `@nestjs/mail` configurado. Proveedor caído o error transitorio: `.retry`. Datos inválidos o rechazo permanente del proveedor (dirección inválida, contenido rechazado): `ack` con log de error, sin reintento. Un `id` ya enviado se descarta (memoria del proceso; persistente pendiente). |
+
+Routing key = `email.send`; el consumidor liga una key por handler (`@OnMerkalyEvent('email.send')`), no
+`email.#`. A futuro, `sms.send` en `signals.merkaly.io-sms` y `whatsapp.send` en
+`signals.merkaly.io-whatsapp`, cada uno con su consumidor, sin tocar al productor.
+
 ### Lo que NO se traduce
 
 Se responde 200 al proveedor, se **descarta con log en debug** y no se publica (sin evento
@@ -273,7 +290,7 @@ Se responde 200 al proveedor, se **descarta con log en debug** y no se publica (
 | --- | --- |
 | Patrón | `type` es el patrón de Nest RMQ (`{ pattern, data }`) y la routing key. El consumidor usa `@OnMerkalyEvent('payment.confirmed')`. |
 | Exchange | `merkaly.events`, topic. El productor publica ahí con `type` como routing key y **nunca nombra una cola**. Decidido el 2026-11-02: con cola directa el productor quedaba acoplado al consumidor. |
-| Cola por consumidor | Con el nombre del repo que consume (`api.merkaly.io`, después `payments.merkaly.io`). La declara el consumidor y Nest la liga a cada tipo con handler; un consumidor nuevo no toca al productor. Sin consumidor ligado, el exchange descarta el mensaje: el consumidor tiene que haber arrancado al menos una vez. |
+| Cola por consumidor | `<repo>[-<trabajo>]`: el nombre del repo que consume (`api.merkaly.io`, `payments.merkaly.io`) y, si el repo separa trabajos, un guion y el trabajo (`signals.merkaly.io-emails`; a futuro `api.merkaly.io-orders`). El paquete agrega `.retry` y `.dlq` (`signals.merkaly.io-emails.retry`, `signals.merkaly.io-emails.dlq`). La declara el consumidor y Nest la liga a cada tipo con handler; un consumidor nuevo no toca al productor. Sin consumidor ligado, el exchange descarta el mensaje: el consumidor tiene que haber arrancado al menos una vez. |
 | Dead letter | `<cola>.dlq`, vía `x-dead-letter-exchange` de la cola principal. |
 | Cola sin consumir | Argumentos de la cola principal: `x-message-ttl` 7 días, `x-max-length` 10.000, `x-overflow: drop-head`, dead letter a la `.dlq`. Solo el consumidor declara la cola, así que no hay choque de argumentos; cambiarlos exige borrar la cola. |
 | Reintento del productor | `publish` espera el ack del broker; si falla, el webhook responde 503 y el proveedor reintenta (Asaas pausa la cola de webhooks tras fallos seguidos, hay que vigilarlo). |
@@ -326,8 +343,9 @@ pierde).
 | Auth0 login fallido y bloqueo | Fuera del catálogo por ahora. |
 | Stripe sin `AUTH0_ORG_ID` | 200, log de error, no se publica. |
 | Tipado | `type` string del catálogo, `data` genérico (`MerkalyEvent<T>`, `emit<T>(type, data)`); el handler declara la forma que espera. `raw` opcional en todos, `unknown`, 16 KB, saneado, nunca leído por consumidores. |
-| Routing | Exchange topic `merkaly.events` desde ya (2026-11-02); cola por consumidor con el nombre de su repo. |
+| Routing | Exchange topic `merkaly.events` desde ya (2026-11-02); cola por consumidor `<repo>[-<trabajo>]`. |
 | Cola sin consumir | 7 días / 10.000 mensajes. |
+| Comandos de notificación | `<canal>.send` sin prefijo de servicio (`email.send`) en `merkaly.events`, una cola por canal (`signals.merkaly.io-emails`). Hoy un servicio consume una sola cola de eventos: `rabbitConsumerOptions` liga todos los `@OnMerkalyEvent` del transporte RMQ a cada cola que se conecte, así que la segunda cola de signals necesitará un transport id por cola (como `@OnMerkalyRequest`). |
 
 ## 9. Request-reply
 
