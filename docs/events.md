@@ -348,7 +348,8 @@ Para quien necesita una respuesta en el momento (el proveedor espera el body). P
 
 | Tipo | Quién pregunta | Quién responde | `data` | Respuesta |
 | --- | --- | --- | --- | --- |
-| `payment.withdrawal.authorize` | webhooks (`POST /asaas/withdrawals`) | api | `{ transfer: { id, value, externalReference, operationType } }` (`value` en reais, como lo manda Asaas; nunca la clave Pix) | `{ status: 'APPROVED' }` o `{ status: 'REFUSED', refuseReason }` |
+| `payment.withdrawal.authorize` | webhooks (`POST /asaas/withdrawals`) | api | `{ transfer: { id, amount, externalReference, operationType } }` (`amount` en centavos; nunca la clave Pix) | `{ status: 'APPROVED' }` o `{ status: 'REFUSED', refuseReason }` |
+| `payment.refund.authorize` | webhooks (`POST /asaas/withdrawals`) | api | `{ refund: { id, payment, amount } }` (`amount` en centavos, `payment` = cobro devuelto) | `{ status: 'APPROVED' }` o `{ status: 'REFUSED', refuseReason }` |
 
 Pedidos que responde `payments.merkaly.io` (aprobados 2026-11-22, se implementan uno por PR). El
 prefijo `payments.` nombra al servicio que responde, para no confundirlos con los que responde el
