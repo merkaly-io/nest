@@ -18,6 +18,7 @@ import {
   DEFAULT_INVOKE_TIMEOUT,
   DEFAULT_PUBLISH_TIMEOUT,
   MerkalyInvokeOptions,
+  MerkalyRoute,
   RABBIT_OPTIONS,
   RabbitModuleOptions,
 } from './rabbit.options';
@@ -98,33 +99,30 @@ export class EventsPublisher implements OnApplicationBootstrap, OnApplicationShu
 
   // Event: a fact of this service, on its own exchange merkaly.<service>
   public emit<T>(type: string, data: T, meta?: MerkalyEventMeta): Promise<MerkalyEvent<T>> {
-    return this.send(this.options.service, type, data, meta);
+    return this.send({ service: this.options.service, type }, data, meta);
   }
 
   // Delivered event: an outside fact handed to its owner, on merkaly.<service> (gateway)
   public deliver<T>(
-    service: string,
-    type: string,
+    route: MerkalyRoute,
     data: T,
     meta?: MerkalyEventMeta,
   ): Promise<MerkalyEvent<T>> {
-    return this.send(service, type, data, meta);
+    return this.send(route, data, meta);
   }
 
   // Command: an order for `service` (no reply), on its exchange merkaly.<service>
   public command<T>(
-    service: string,
-    type: string,
+    route: MerkalyRoute,
     data: T,
     meta?: MerkalyEventMeta,
   ): Promise<MerkalyEvent<T>> {
-    return this.send(service, type, data, meta);
+    return this.send(route, data, meta);
   }
 
   // Invoke: request-reply with `service`; resolves with the handler's return value
   public invoke<TReq, TRes>(
-    service: string,
-    type: string,
+    { service, type }: MerkalyRoute,
     data: TReq,
     { timeout: ms = DEFAULT_INVOKE_TIMEOUT, ...meta }: MerkalyInvokeOptions = {},
   ): Promise<TRes> {
@@ -225,8 +223,7 @@ export class EventsPublisher implements OnApplicationBootstrap, OnApplicationShu
   }
 
   private send<T>(
-    service: string,
-    type: string,
+    { service, type }: MerkalyRoute,
     data: T,
     meta?: MerkalyEventMeta,
   ): Promise<MerkalyEvent<T>> {

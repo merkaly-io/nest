@@ -71,6 +71,12 @@ export interface EventsConsumerAsyncOptions extends Pick<ModuleMetadata, 'import
   inject?: any[];
 }
 
+// Where a deliver, command or invoke goes: exchange merkaly.<service>, routing key = type
+export interface MerkalyRoute {
+  service: string; // destination owner (api, payments, auth)
+  type: string; // message type (payment.confirmed, email.send)
+}
+
 export interface MerkalyInvokeOptions extends MerkalyEventMeta {
   timeout?: number; // ms to wait for the reply, default 5000
 }
