@@ -1,79 +1,25 @@
-import { DynamicModule, Global, Module, Provider } from '@nestjs/common';
-import { ClientProxyFactory, Transport } from '@nestjs/microservices';
+import { DynamicModule, Global, Module } from '@nestjs/common';
 import { EventsConsumer } from './events.consumer';
 import { EventsPublisher } from './events.publisher';
 import {
   CONSUMER_OPTIONS,
   EventsConsumerAsyncOptions,
   EventsConsumerOptions,
-  MERKALY_EXCHANGE,
-  MERKALY_REQUESTS_EXCHANGE,
-  RABBIT_CLIENT,
   RABBIT_OPTIONS,
-  RABBIT_REQUEST_CLIENT,
-  RabbitClient,
   RabbitModuleAsyncOptions,
   RabbitModuleOptions,
+  checkRabbitOptions,
 } from './rabbit.options';
-
-// Publishes to the exchange only: the producer never names a queue
-export function createRabbitClient(options: RabbitModuleOptions): RabbitClient | null {
-  if (!options.url) {
-    if (options.required) throw new Error('RabbitMQ url is required'); // fail boot loudly
-
-    return null;
-  }
-
-  return ClientProxyFactory.create({
-    transport: Transport.RMQ,
-    options: {
-      urls: [options.url],
-      exchange: options.exchange ?? MERKALY_EXCHANGE,
-      exchangeType: 'topic',
-      wildcards: true, // publish(exchange, pattern) instead of sendToQueue
-      persistent: true,
-    },
-  });
-}
-
-// Requests: own exchange so no events queue (bound to #) ever gets them; replies via direct reply-to
-export function createRabbitRequestClient(options: RabbitModuleOptions): RabbitClient | null {
-  if (!options.url) return null;
-
-  return ClientProxyFactory.create({
-    transport: Transport.RMQ,
-    options: {
-      urls: [options.url],
-      exchange: MERKALY_REQUESTS_EXCHANGE,
-      exchangeType: 'topic',
-      wildcards: true,
-      persistent: false, // worthless after the timeout
-    },
-  }); // replyQueue defaults to amq.rabbitmq.reply-to
-}
-
-const clientProvider: Provider = {
-  provide: RABBIT_CLIENT,
-  useFactory: createRabbitClient,
-  inject: [RABBIT_OPTIONS],
-};
-
-const requestClientProvider: Provider = {
-  provide: RABBIT_REQUEST_CLIENT,
-  useFactory: createRabbitRequestClient,
-  inject: [RABBIT_OPTIONS],
-};
 
 @Global()
 @Module({})
 export class RabbitModule {
+  // Publisher of this service: emit() to merkaly.<service>, command()/invoke() to merkaly.<target>
   static forRoot(options: RabbitModuleOptions): DynamicModule {
     return {
       module: RabbitModule,
       providers: [
-        { provide: RABBIT_OPTIONS, useValue: options },
-        clientProvider,
-        requestClientProvider,
+        { provide: RABBIT_OPTIONS, useFactory: () => checkRabbitOptions(options) },
         EventsPublisher,
       ],
       exports: [EventsPublisher],
@@ -85,16 +31,20 @@ export class RabbitModule {
       module: RabbitModule,
       imports: options.imports ?? [],
       providers: [
-        { provide: RABBIT_OPTIONS, useFactory: options.useFactory, inject: options.inject ?? [] },
-        clientProvider,
-        requestClientProvider,
+        {
+          provide: RABBIT_OPTIONS,
+          useFactory: async (...args: unknown[]) =>
+            checkRabbitOptions(await options.useFactory(...args)),
+          inject: options.inject ?? [],
+        },
         EventsPublisher,
       ],
       exports: [EventsPublisher],
     };
   }
 
-  static forConsumer(options: EventsConsumerOptions): DynamicModule {
+  // EventsConsumer.handle for the handlers of every rabbitQueue() server of the app
+  static forConsumer(options: EventsConsumerOptions = {}): DynamicModule {
     return {
       module: RabbitModule,
       providers: [{ provide: CONSUMER_OPTIONS, useValue: options }, EventsConsumer],

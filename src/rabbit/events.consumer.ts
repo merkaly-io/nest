@@ -3,8 +3,10 @@ import { RmqContext } from '@nestjs/microservices';
 import { MerkalyEvent } from '../events';
 import { LoggerService, requestContext } from '../logger';
 import { describeError } from './events.publisher';
-import { deadLetterQueue, retryQueue } from './rabbit.consumer';
-import { CONSUMER_OPTIONS, DEFAULT_RETRIES, EventsConsumerOptions } from './rabbit.options';
+import { deliveryOf } from './rabbit.delivery';
+import { deadLetterQueue, retryQueue } from './rabbit.names';
+import { CONSUMER_OPTIONS, EventsConsumerOptions } from './rabbit.options';
+import type { ConfirmChannel, ConsumeMessage } from 'amqplib';
 
 const GROUP = 'EVENT';
 const RETRIES_HEADER = 'x-merkaly-retries';
@@ -27,7 +29,7 @@ export class EventsConsumer {
     this.logger = logger ?? new LoggerService();
   }
 
-  // Runs the handler and settles the message: ack, .retry or .dlq
+  // Runs the handler and settles the message: ack, .retry or .dlq of the queue it came from
   public handle<T>(
     event: MerkalyEvent<T>,
     context: RmqContext,
@@ -69,35 +71,76 @@ export class EventsConsumer {
     });
   }
 
-  private ack(context: RmqContext) {
-    context.getChannelRef().ack(context.getMessage());
+  private channel(context: RmqContext) {
+    return context.getChannelRef() as ConfirmChannel; // amqp-connection-manager opens confirm channels
   }
 
-  // Main queue dead-letters to the .dlq on nack without requeue
+  private ack(context: RmqContext) {
+    this.channel(context).ack(context.getMessage() as ConsumeMessage);
+  }
+
+  // The queue dead-letters to its .dlq on nack without requeue
   private deadLetter(context: RmqContext, message: string, trace?: unknown) {
-    context.getChannelRef().nack(context.getMessage(), false, false);
+    const queue = deliveryOf(context.getMessage())?.queue;
+
+    this.channel(context).nack(context.getMessage() as ConsumeMessage, false, false);
     this.logger.error({
       group: GROUP,
-      message: `${message} -> ${deadLetterQueue(this.options.queue)}`,
+      message: `${message} -> ${queue ? deadLetterQueue(queue) : 'dead letter'}`,
       trace,
     });
   }
 
-  private retry(context: RmqContext, message: string, trace: unknown) {
-    const msg = context.getMessage();
+  // Acks the original only once the broker confirmed the copy in .retry (ENG-91); otherwise requeues it
+  private retry(context: RmqContext, message: string, trace: unknown): Promise<void> {
+    const msg = context.getMessage() as ConsumeMessage;
+    const delivery = deliveryOf(msg);
+
+    if (!delivery) {
+      this.deadLetter(context, `${message}, not consumed by a rabbitQueue() server`, trace);
+
+      return Promise.resolve();
+    }
+
     const attempt = Number(msg.properties.headers?.[RETRIES_HEADER] ?? 0) + 1;
-    const max = this.options.retries ?? DEFAULT_RETRIES;
+    const max = delivery.retries;
 
-    if (attempt > max) return this.deadLetter(context, `${message}, ${max} retries`, trace);
+    if (attempt > max) {
+      this.deadLetter(context, `${message}, ${max} retries`, trace);
 
-    const channel = context.getChannelRef();
+      return Promise.resolve();
+    }
 
-    channel.sendToQueue(retryQueue(this.options.queue), msg.content, {
-      ...msg.properties,
-      headers: { ...msg.properties.headers, [RETRIES_HEADER]: attempt },
-      persistent: true,
+    const channel = this.channel(context);
+    const target = retryQueue(delivery.queue);
+    const copy = new Promise<void>((resolve, reject) => {
+      channel.sendToQueue(
+        target,
+        msg.content,
+        {
+          ...msg.properties,
+          headers: { ...msg.properties.headers, [RETRIES_HEADER]: attempt },
+          persistent: true,
+        },
+        (error: unknown) => (error ? reject(new Error(describeError(error))) : resolve()),
+      );
     });
-    channel.ack(msg);
-    this.logger.error({ group: GROUP, message: `${message}, retry ${attempt}/${max}`, trace });
+
+    return copy
+      .then(() => {
+        channel.ack(msg);
+        this.logger.error({ group: GROUP, message: `${message}, retry ${attempt}/${max}`, trace });
+      })
+      .catch((error: unknown) => {
+        this.logger.error({
+          group: GROUP,
+          message: `${message}, ${target} not confirmed "${describeError(error)}": requeued`,
+          trace,
+        });
+
+        return Promise.resolve()
+          .then(() => channel.nack(msg, false, true))
+          .catch(() => undefined); // channel gone: the broker redelivers it anyway
+      });
   }
 }
