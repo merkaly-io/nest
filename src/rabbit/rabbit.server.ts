@@ -1,6 +1,13 @@
-import { CustomStrategy, MessageHandler, RmqContext, ServerRMQ } from '@nestjs/microservices';
+import {
+  CustomStrategy,
+  MessageHandler,
+  ReadPacket,
+  RmqContext,
+  ServerRMQ,
+} from '@nestjs/microservices';
 import { MerkalyInvoke } from '../events';
 import { LoggerService, requestContext } from '../logger';
+import { DEAD_LETTER_GROUP } from './events.consumer';
 import { describeError } from './events.publisher';
 import {
   INVOKES_TRANSPORT,
@@ -141,7 +148,29 @@ abstract class MerkalyServer extends ServerRMQ {
     pattern: string,
     fields: Record<string, any> | undefined,
   ) {
-    return !fields?.exchange || fields.routingKey === pattern;
+    const matches = !fields?.exchange || fields.routingKey === pattern;
+
+    if (!matches) {
+      this.unhandled(`${pattern} arrived with routing key "${fields?.routingKey}"`); // Nest nacks it right after
+    }
+
+    return matches;
+  }
+
+  // No handler for the key (old binding, renamed type): never acked in silence (ENG-115)
+  public override handleEvent(pattern: string, packet: ReadPacket, context: RmqContext) {
+    if (this.getHandlerByPattern(pattern)) return super.handleEvent(pattern, packet, context);
+
+    if (!this.noAck) this.channel?.nack(context.getMessage() as ConsumeMessage, false, false);
+    this.unhandled(
+      `${pattern} (${(packet.data as { id?: string } | undefined)?.id}) has no handler`,
+    );
+
+    return Promise.resolve();
+  }
+
+  protected unhandled(reason: string) {
+    this.log.warn({ group: 'RABBIT', message: `${this.queue}: ${reason}, dropped` });
   }
 }
 
@@ -161,10 +190,11 @@ export class MerkalyQueueServer extends MerkalyServer {
       noAck: false, // EventsConsumer acks
       prefetchCount: options.prefetchCount ?? DEFAULT_PREFETCH,
       arguments: {
-        // TODO phase 5: review drop-head, it discards the oldest messages under pressure (to the .dlq)
+        // Frozen: changing them makes the broker refuse the redeclare (PRECONDITION_FAILED).
+        // Production overrides overflow and limits with the merkaly-work operator policy (docs/events.md)
         'x-message-ttl': WEEK, // unconsumed for a week: to the .dlq
         'x-max-length': 10_000,
-        'x-overflow': 'drop-head',
+        'x-overflow': 'drop-head', // reject-publish-dlx under the policy
         'x-dead-letter-exchange': '',
         'x-dead-letter-routing-key': deadLetterQueue(queue),
       },
@@ -184,6 +214,14 @@ export class MerkalyQueueServer extends MerkalyServer {
         'x-dead-letter-exchange': '',
         'x-dead-letter-routing-key': this.queue,
       },
+    });
+  }
+
+  // Nacked without requeue: the queue dead-letters it to its .dlq
+  protected override unhandled(reason: string) {
+    this.log.error({
+      group: DEAD_LETTER_GROUP,
+      message: `${reason} -> ${deadLetterQueue(this.queue)}`,
     });
   }
 
