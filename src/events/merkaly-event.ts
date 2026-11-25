@@ -1,12 +1,6 @@
 import { randomUUID } from 'crypto';
 
-// Business event names are plain strings, `<domain>.<entity>.<fact>` (payment.received): the value is the routing key
-
-export enum MerkalyProducer {
-  WEBHOOKS = 'webhooks.merkaly.io',
-  API = 'api.merkaly.io',
-  PAYMENTS = 'payments.merkaly.io',
-}
+// Message types are plain strings, `<domain>.<entity>.<fact>` (payment.received): the value is the routing key
 
 export type MerkalyEventSource = 'asaas' | 'stripe' | 'auth0' | 'aliexpress';
 
@@ -81,7 +75,7 @@ export interface MerkalyEvent<T = unknown> {
   id: string; // idempotency key, `<source>:<provider id>` or a UUID
   type: string; // payment.received, supplier.order.status_changed...
   version: number; // contract version of `data` for this type
-  producer: MerkalyProducer;
+  producer: string; // short service name that published it (webhooks), its exchange is merkaly.<producer>
   source?: MerkalyEventSource;
   organization?: string; // Auth0 org id
   occurredAt: string; // ISO, when it happened at the provider
@@ -91,8 +85,8 @@ export interface MerkalyEvent<T = unknown> {
   raw?: MerkalyRawEvent;
 }
 
-// Request-reply over merkaly.requests: same envelope plus the moment the caller stops waiting
-export interface MerkalyRequest<T = unknown> extends MerkalyEvent<T> {
+// Invoke (request-reply): same envelope plus the moment the caller stops waiting
+export interface MerkalyInvoke<T = unknown> extends MerkalyEvent<T> {
   expiresAt: string; // ISO, after it the consumer drops the request unanswered
 }
 
@@ -118,7 +112,7 @@ function capRaw(raw?: MerkalyRawEvent): MerkalyRawEvent | undefined {
 }
 
 export function createMerkalyEvent<T>(
-  producer: MerkalyProducer,
+  producer: string,
   type: string,
   data: T,
   meta: MerkalyEventMeta = {},

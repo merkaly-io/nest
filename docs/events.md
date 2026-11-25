@@ -1,57 +1,87 @@
-# Contrato de eventos entre servicios
+# Mensajería entre servicios (RabbitMQ)
 
-Estado: **aprobado por el Founder; tipos de pagos y subconta implementados en `@merkaly/nest` 0.2.0 (campos de diagnóstico de `PaymentRef` en 0.2.9, request-reply en 0.3.1)** (exchange decidido el 2026-11-02). El resto del catálogo entra por proveedor.
+Estado: **`@merkaly/nest` 0.5.0** (ENG-129, fase 2 de la migración a RabbitMQ por servicio). Un
+exchange por servicio, varias colas por servicio con claves exactas, publisher confirms con
+`mandatory` y decoradores `@HandleEvent`, `@HandleCommand` y `@HandleInvoke`. Reemplaza a
+`merkaly.events`, `merkaly.requests`, `@OnMerkalyEvent` y `@OnMerkalyRequest` (0.4.x), sin
+convivencia: no había tráfico real.
 
-Antes, `webhooks.merkaly.io` publicaba en `api.merkaly.io-queue` el evento crudo de cada proveedor
-(`asaas.payment_received`, `stripe.invoice.paid`...) con el sobre `WebhookEvent`, que en 0.2.0 se
-quitó. Ahora publica eventos normalizados en el exchange `merkaly.events`.
+Los servicios migran en las fases siguientes (signals primero, después api y webhooks juntos). Este
+documento describe el modelo nuevo y, en el catálogo, lo que el código publica y consume hoy.
+payments queda **pendiente de migración** (sigue en 0.4.x, ver sección 9).
 
 Principios:
 
-- **Eventos de negocio normalizados**; el evento original del proveedor viaja adentro solo para
-  auditoría.
-- Los tipos son **strings** (`payment.received`); el catálogo de este documento es la referencia. Desde 0.3.0 no hay enum ni mapa de tipos en el paquete.
-- El sobre dice **qué app lo produjo**.
-- `data` es un **contrato acordado** por tipo de evento (interfaces opcionales como `PaymentRef`).
+- **Mensajes de negocio normalizados** (`payment.received`, nunca `asaas.payment_received`); el
+  evento original del proveedor viaja adentro solo para auditoría.
+- Los nombres son **strings** por convención; el paquete no exporta enums de servicios ni de
+  mensajes. Valida el formato al arrancar. Sumar un servicio o un mensaje no obliga a publicar el
+  paquete: cada servicio define sus constantes y este catálogo es la referencia.
+- El sobre dice **qué servicio lo produjo** (`producer`, nombre corto).
+- `data` es un **contrato acordado** por tipo (interfaces opcionales como `PaymentRef`, solo tipos).
 
-## 1. Por qué el contrato vive en `@merkaly/nest`
+## 1. Por qué vive en `@merkaly/nest`
 
-`@merkaly/nest` ya es la dependencia común de los backends (api, webhooks, payments) y ya exporta
-`RabbitModule`, `EventsPublisher` y `EventsConsumer`. El paquete define el sobre (`MerkalyEvent<T>`)
-y algunas interfaces de `data` reutilizables (`PaymentRef`, `SupplierOrderStatusChanged`...); el
-`type` es un string libre.
-
-Hasta 0.2.x había un enum `MerkalyEventType` y un `EventDataMap` que tipaban `data` por tipo. Se
-quitaron en 0.3.0 (decisión del Founder, 2026-11-07): obligaban a publicar el paquete por cada
-evento nuevo y no evitaban errores reales. Un evento nuevo ya no toca el paquete: el productor
-emite el string y el consumidor lo escucha, documentándolo en el catálogo.
+`@merkaly/nest` es la dependencia común de los backends (api, webhooks, signals, payments) y la
+fuente única de versiones de Nest. Define el sobre (`MerkalyEvent<T>`), algunas interfaces de `data`
+reutilizables y el transporte. El `type` es un string libre del catálogo.
 
 | Alternativa | Por qué no |
 | --- | --- |
-| Copiar los tipos en cada servicio | Se desalinean. Ya pasó: los patrones están duplicados en `webhooks` (`asaas.events.ts`, `aliexpress.topics.ts`, `auth0.types.ts`) y en `nest` (`webhook-patterns.ts`). |
-| Registro de JSON Schema (o AsyncAPI) | Demasiado para 2 o 3 servicios TypeScript del mismo equipo. Se puede generar después desde los tipos si entra un consumidor en otro lenguaje. |
-| `@merkaly/api` | Son los contratos HTTP que el api genera para admin y store. Frontera equivocada: los frontends no deben ver eventos internos y el api sería dueño de un contrato que produce otro servicio. |
+| Copiar los tipos en cada servicio | Se desalinean. |
+| Registro de JSON Schema (o AsyncAPI) | Demasiado para pocos servicios TypeScript del mismo equipo. Se puede generar después si entra un consumidor en otro lenguaje. |
+| `@merkaly/api` | Son los contratos HTTP de admin y store; los frontends no deben ver mensajes internos. |
 
 ## 2. Nombres
 
-| Regla | Detalle |
-| --- | --- |
-| Forma | `<dominio>.<entidad>.<hecho>` o `<dominio>.<hecho>` cuando la entidad es el propio dominio. Segmentos separados por punto, en minúsculas, en inglés. |
-| Hecho | En pasado; si necesita dos palabras, snake_case (`status_changed`, `signed_up`). |
-| Comando | Cuando el mensaje pide una acción (sin respuesta, con `.retry` y `.dlq`): `<entidad>.<verbo>` en presente, **sin el servicio**: el mensaje dice qué hacer, no quién lo hace (`email.send`). Distinto de los pedidos request-reply, que llevan el prefijo del servicio que responde (`payments.*`). |
-| Patrón | El string del tipo es el patrón de Nest RMQ y la routing key. |
+Se arman desde strings y se validan al arrancar (`RabbitNameError` con un mensaje claro). Nada de
+`*` ni `#`.
 
-## 3. Sobre (envelope) y tipado
+| Pieza | Regla | Ejemplo |
+| --- | --- | --- |
+| Servicio | `^[a-z][a-z0-9-]*$`, nombre corto del repo | `api`, `webhooks`, `signals` |
+| Exchange | `merkaly.<servicio>`, topic, durable, uno por servicio | `merkaly.webhooks` |
+| Trabajo (cola) | `^[a-z][a-z0-9-]*$`; `invokes` está reservado | `payments`, `identity`, `emails` |
+| Cola | `merkaly.<servicio>-<trabajo>`, más `.retry` y `.dlq` | `merkaly.api-payments`, `merkaly.api-payments.retry`, `merkaly.api-payments.dlq` |
+| Cola de invokes | `merkaly.<servicio>-invokes`, sin `.retry` ni `.dlq` | `merkaly.api-invokes` |
+| Tipo de mensaje | `^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$`: segmentos con punto, minúsculas, al menos dos | `payment.confirmed`, `email.send` |
+| Routing key | igual al tipo (Nest exige patrón = routing key) | `payment.confirmed` |
 
-`type` es un string y `data` un genérico: el consumidor declara qué forma espera.
+Forma del tipo:
+
+| Clase | Forma | Ejemplo |
+| --- | --- | --- |
+| Evento | `<dominio>.<entidad>.<hecho>` o `<dominio>.<hecho>`, hecho en pasado (snake_case si son dos palabras) | `supplier.order.status_changed` |
+| Comando | `<entidad>.<verbo>` en presente, **sin el servicio**: dice qué hacer, no quién | `email.send` |
+| Invoke | igual que un comando, sin el servicio | `payment.withdrawal.authorize` |
+
+Sin prefijos de transporte (`command.`, `event.`) ni de servicio: el exchange ya dice de quién es.
+
+## 3. Clases de mensaje
+
+| Clase | Quién publica | Exchange | API del publisher | Handler | Respuesta | `.retry` / `.dlq` |
+| --- | --- | --- | --- | --- | --- | --- |
+| Evento (algo que pasó) | quien lo vivió | el **propio** | `emit(type, data, meta?)` | `@HandleEvent(type, { queue, from })` | no | sí |
+| Comando (algo que hacer) | quien lo pide | el **del destino** | `command(service, type, data, meta?)` | `@HandleCommand(type, { queue })` | no | sí |
+| Invoke (pedido con respuesta en segundos) | quien pregunta | el **del destino** | `invoke(service, type, data, { timeout, ...meta })` | `@HandleInvoke(type)` | sí, el retorno del handler | no |
+
+- `@HandleEvent` liga la cola a `merkaly.<from>` (el exchange de quien publica el evento; `from` es
+  obligatorio, también para eventos propios: `from: 'api'`).
+- `@HandleCommand` y `@HandleInvoke` ligan al exchange propio.
+- `@HandleEvent` y `@HandleCommand` aceptan un tipo o una lista, y se pueden apilar en el mismo
+  método mientras sea la **misma cola** (por ejemplo, claves de `merkaly.webhooks` y de
+  `merkaly.api` en `identity`). `@HandleInvoke` es un tipo por handler.
+- Los handlers van en **controllers** (Nest solo descubre patrones ahí).
+
+## 4. Sobre (envelope)
 
 ```ts
 export interface MerkalyEvent<T = unknown> {
   id: string;
   type: string; // payment.confirmed
   version: number;
-  producer: MerkalyProducer;
-  source?: MerkalyEventSource;
+  producer: string; // servicio que publicó: webhooks, api, signals
+  source?: MerkalyEventSource; // 'asaas' | 'stripe' | 'auth0' | 'aliexpress'
   organization?: string;
   occurredAt: string;
   publishedAt: string;
@@ -60,57 +90,103 @@ export interface MerkalyEvent<T = unknown> {
   raw?: MerkalyRawEvent;
 }
 
-export interface MerkalyRawEvent {
-  type: string; // tipo original del proveedor, sin tocar (PAYMENT_RECEIVED, invoice.paid, ss, 53)
-  payload?: unknown; // unknown a propósito: solo auditoría y diagnóstico
-  truncated?: boolean;
-}
-
-export enum MerkalyProducer {
-  WEBHOOKS = 'webhooks.merkaly.io',
-  API = 'api.merkaly.io',
-  PAYMENTS = 'payments.merkaly.io',
-}
-
-export type MerkalyEventSource = 'asaas' | 'stripe' | 'auth0' | 'aliexpress';
-
-// productor
-publisher.emit('payment.confirmed', { ...ref, confirmedAt }, { organization, source: 'asaas', raw });
-
-// consumidor
-@OnMerkalyEvent('payment.confirmed')
-handle(event: MerkalyEvent<PaymentRef & { confirmedAt: string }>) {
-  event.data.paymentId; // string, por la forma que declara el handler
+export interface MerkalyInvoke<T = unknown> extends MerkalyEvent<T> {
+  expiresAt: string; // ISO, ahora + timeout: vencido, el consumidor lo descarta
 }
 ```
 
 | Campo | Obligatorio | Regla |
 | --- | --- | --- |
-| `id` | sí | Clave de idempotencia; el consumidor deduplica por ella. Evento de proveedor: `<source>:<id del proveedor>` (`asaas:evt_...`, `stripe:evt_...`, `auth0:<log_id>`). AliExpress no manda id: `aliexpress:<sha256 del mensaje, 32 hex>`. Evento interno: UUID v4. Un evento de proveedor produce como máximo un evento normalizado; si algún día produce varios, se sufija `#<type>`. |
-| `type` | sí | String del catálogo (`payment.confirmed`). |
+| `id` | sí | Clave de idempotencia; el consumidor deduplica por ella. Evento de proveedor: `<source>:<id del proveedor>` (`asaas:evt_...`, `auth0:<log_id>`). AliExpress no manda id: `aliexpress:<sha256 del mensaje, 32 hex>` (o `aliexpress:61:<item_id>:<event_time_stamps>`). Mensaje interno: UUID v4, o un id estable por envío en comandos (`email.send`). |
+| `type` | sí | String del catálogo. |
 | `version` | sí | Versión del contrato de `data` para ese `type`, entero desde 1. No es la versión del paquete. |
-| `producer` | sí | Repo que publicó (`MerkalyProducer`). |
-| `source` | no | Proveedor externo de origen. Ausente en eventos internos. |
-| `organization` | según tipo | Id de organización de Auth0 (`org_...`). Ver columna "Org" del catálogo. Si el productor no la conoce, la omite (nunca string vacío). |
-| `occurredAt` | sí | ISO 8601 UTC del hecho según el proveedor (Asaas `dateCreated`, Stripe `created`, Auth0 `date`, AliExpress `timestamp`). Si falta, igual a `publishedAt`. |
-| `publishedAt` | sí | ISO 8601 UTC del momento de publicar. Reemplaza `receivedAt`. |
-| `correlationId` | no | Id del request HTTP que originó el evento (el del logger); un evento derivado hereda el del padre. Sirve para seguir un flujo en los logs de varios servicios. |
-| `data` | sí | Contrato acordado por tipo (catálogo). Todos los montos de eventos y pedidos van en **centavos enteros** (el productor convierte en la frontera; el valor del proveedor solo en `raw`), fechas ISO, ids del proveedor como string (los de AliExpress superan 2^53). |
-| `raw` | no | Opcional en **todos** los eventos. Solo auditoría y diagnóstico: **ningún consumidor lo lee**; si un dato hace falta, va a `data` (patch). Máximo **16 KB** serializado; si se pasa, `payload` se omite y `truncated: true`. Saneado antes de publicar. |
+| `producer` | sí | Nombre corto del servicio que publicó (el de `RabbitModule.forRoot({ service })`). Hasta 0.4.x era `webhooks.merkaly.io`. Es el ORIGIN de la línea de log del consumidor. |
+| `source` | no | Proveedor externo de origen. Ausente en mensajes internos. |
+| `organization` | según tipo | Id de organización de Auth0 (`org_...`). Si el productor no la conoce, la omite (nunca string vacío). |
+| `occurredAt` | sí | ISO 8601 UTC del hecho según el proveedor. Si falta, igual a `publishedAt`. |
+| `publishedAt` | sí | ISO 8601 UTC del momento de publicar. |
+| `correlationId` | no | Id del request HTTP que originó el mensaje; un mensaje derivado hereda el del padre. |
+| `data` | sí | Contrato por tipo. Montos en **centavos enteros** (el productor convierte en la frontera), fechas ISO, ids del proveedor como string (los de AliExpress superan 2^53). |
+| `raw` | no | Solo auditoría: **ningún consumidor lo lee**. Máximo 16 KB serializado (`RAW_PAYLOAD_LIMIT`); si se pasa, `payload` se omite y `truncated: true`. Saneado por el productor. |
 
-Saneado de `raw` (lista cerrada por proveedor, en el productor):
+Saneado de `raw` (en el productor):
 
 | Proveedor | Se quita |
 | --- | --- |
 | Asaas | datos del cliente, `creditCard` salvo marca y últimos 4, `pixQrCode`, urls de factura |
-| Stripe | `customer_email`, `customer_name`, `customer_address`, `customer_phone`, métodos de pago |
 | Auth0 | `ip`, `user_agent`, `details`, `location_info`, `hostname` |
 | AliExpress | dirección, nombre, teléfono y CPF del destinatario si vinieran |
 
-## 4. Catálogo
+En el cable el cuerpo es el paquete de Nest RMQ: `{ pattern: type, data: <sobre> }` para eventos y
+comandos, y `{ pattern, data, id }` para invokes (Nest responde a los paquetes con `id`).
 
-Productor de todos: `webhooks.merkaly.io`, al exchange `merkaly.events`. Consumidor hoy: cola `api.merkaly.io`. "Org":
-**sí** = obligatoria (sin ella se responde 200 al proveedor, se loguea error y no se publica),
+## 5. Topología y routing
+
+| Regla | Detalle |
+| --- | --- |
+| Exchange | Uno por servicio, `merkaly.<servicio>`, topic, durable. Lo declara el publisher del dueño, cada consumidor que liga claves de él y el publisher que le manda un comando o invoke (mismos argumentos, la declaración es idempotente). |
+| Colas | Varias por servicio, una por trabajo. Cada cola tiene un solo dueño; las réplicas del servicio se reparten sus mensajes. La declara el dueño con `rabbitQueue()` (o `rabbitInvokes()`) en su `main.ts`. |
+| Bindings | Una clave **exacta** por tipo con handler, nunca `#` ni `*`. Una cola puede ligar claves de varios exchanges. |
+| Transporte | Cada cola tiene su transport id (`Symbol.for('merkaly.queue:<trabajo>')`, invokes `Symbol.for('merkaly.invokes')`): los handlers de una cola nunca se ligan a otra. |
+| Clave repetida | Dos handlers de la misma clave en la misma cola hacen fallar el boot (Nest correría los dos y habría doble ack). |
+| Patrón | El `pattern` del cuerpo tiene que ser la routing key cuando el mensaje llega por un exchange; si no, se descarta a la `.dlq`. Lo que vuelve de `.retry` llega por el exchange por defecto y no se valida. |
+| Sin consumidor | Todo publish va con `mandatory`: si ninguna cola liga la clave, el broker devuelve el mensaje y la promesa rechaza con `UnroutableMessageException` (503). El productor no pierde mensajes en silencio; webhooks responde 5xx y el proveedor reintenta. Corolario: **la cola del consumidor tiene que existir antes** de que el productor publique (desplegar primero al consumidor). |
+| Confirmación | Publisher confirms: `emit` y `command` resuelven cuando el broker tomó y enrutó el mensaje. Timeout 5 s (`timeout` del módulo). |
+| Broker caído | Falla en el momento (`ServiceUnavailableException`, "not connected"), sin buffer silencioso. Con la conexión arriba pero el canal ocupado, el mensaje espera como máximo el timeout y se descarta del buffer. |
+| Cola sin consumir | Argumentos de la cola principal (sin cambios desde 0.4): `x-message-ttl` 7 días, `x-max-length` 10.000, `x-overflow: drop-head`, dead letter a la `.dlq`. Cambiarlos exige borrar la cola. **TODO fase 5**: revisar `drop-head` (bajo presión descarta los más viejos a la `.dlq`). |
+| Bindings viejos | El paquete liga, no desliga: si se quita un handler, la clave queda ligada en el broker y sus mensajes van a la `.dlq` (sin handler). Desligar a mano (management UI o `rabbitmqadmin`). |
+
+### Reintentos del consumidor (`EventsConsumer.handle`)
+
+| Resultado | Qué pasa |
+| --- | --- |
+| Éxito | `ack`. |
+| `EventRejectedException` (venta inexistente, monto distinto...) | `ack` + `WARN`: reintentar no lo arregla. |
+| Otro error (Mongo, red, proveedor caído) | Copia a `<cola>.retry` (TTL `retryDelay`, 30 s por defecto, vuelve sola a la cola) con la cabecera `x-merkaly-retries`, y `ack` del original **solo después de la confirmación del broker** (ENG-91). Si la copia no se confirma, `nack` con requeue del original. Tras `retries` intentos (5 por defecto), `.dlq`. |
+| Malformado o `version` mayor que la del handler | `.dlq` directo. |
+
+La cola de origen (para `.retry` y `.dlq`) la conoce el servidor que consumió el mensaje, nunca el
+payload. `retries` y `retryDelay` son por cola (`rabbitQueue({ retries, retryDelay })`).
+
+### Invokes
+
+| Regla | Detalle |
+| --- | --- |
+| Exchange | El del servicio que responde (`invoke('api', ...)` publica en `merkaly.api`). |
+| Cola | `merkaly.<servicio>-invokes`, durable, `noAck`, sin `.retry` ni `.dlq`, `x-message-ttl` 30 s, `x-max-length` 1.000 con `drop-head`. La declara quien responde con `rabbitInvokes()`. |
+| Respuesta | Direct reply-to (`amq.rabbitmq.reply-to`) con `correlationId`, en el mismo canal del publisher. |
+| Mensaje | `expiration` = timeout, no persistente; el sobre lleva `expiresAt`. Vencido: el broker lo descarta y, si igual llega, el servidor lo descarta sin correr el handler (`WARN expired, dropped`). |
+| Errores | Sin respuesta en el plazo: `GatewayTimeoutException`. Handler con error, broker sin configurar o caído: `ServiceUnavailableException`. Nadie ligó el tipo: `UnroutableMessageException` en el momento (sin esperar el timeout). Quien pregunta decide el fallback (webhooks responde `REFUSED`). |
+| Contexto | El handler corre fuera del contexto del app (sin CLS, guards ni interceptors globales); abre el suyo si lo necesita. |
+
+### Idempotencia y orden
+
+- El consumidor deduplica por `id`. Hoy sin persistencia (cada handler es idempotente por diseño;
+  signals deduplica en memoria). Inbox persistente: fase 5 (ENG-112).
+- Orden no garantizado (`received` puede llegar antes que `confirmed`): los handlers releen el estado
+  real en el proveedor.
+
+## 6. Matriz de routing (destino de las fases 3 y 4)
+
+| Mensaje | Clase | Publica | Exchange | Cola dueña |
+| --- | --- | --- | --- | --- |
+| `payment.confirmed`, `.received`, `.failed`, `.overdue`, `.cancelled`, `.refunded`, `.refund.in_progress`, `.split.failed`, `.chargeback.opened`, `.chargeback.updated` | evento | webhooks | `merkaly.webhooks` | `merkaly.api-payments` |
+| `payment.account.approved`, `.rejected`, `.status_changed` | evento | webhooks | `merkaly.webhooks` | `merkaly.api-payments` |
+| `payment.transfer.created`, `.pending`, `.in_bank_processing`, `.blocked`, `.done`, `.failed`, `.cancelled` | evento | webhooks | `merkaly.webhooks` | `merkaly.api-payments` |
+| `supplier.order.status_changed` | evento | webhooks | `merkaly.webhooks` | `merkaly.api-supplier` |
+| `supplier.product.updated` | evento | webhooks | `merkaly.webhooks` | **ninguna** (ver sección 8) |
+| `identity.signup.requested`, `identity.organization.member.added`, `.removed`, `.role.assigned`, `.role.removed`, `identity.organization.created`, `.updated`, `.deleted` | evento | webhooks | `merkaly.webhooks` | `merkaly.api-identity` |
+| `account.user.linked` | evento | api | `merkaly.api` | `merkaly.api-identity` |
+| `payment.withdrawal.authorize`, `payment.refund.authorize` | invoke | webhooks | `merkaly.api` | `merkaly.api-invokes` |
+| `email.send` | comando | nadie hoy | `merkaly.signals` | `merkaly.signals-emails` |
+
+## 7. Catálogo
+
+Lo que el código publica y consume hoy (master de webhooks, api y signals, 2026-11-24). Los
+servicios todavía usan 0.4.x (`merkaly.events` y `merkaly.requests`); el exchange y la cola de la
+tabla son los de la matriz.
+
+"Org": **sí** = obligatoria (sin ella el productor responde 200 al proveedor, loguea y no publica);
 **no** = el productor no la conoce.
 
 ```ts
@@ -121,267 +197,188 @@ interface PaymentRef {
   paymentId: string; // pay_... de Asaas
   saleId: string | null; // del externalReference <orgId>:<saleId>
   method: PaymentMethod;
-  amount: number; // centavos (Asaas manda reais decimales)
+  amount: number; // centavos
   netAmount: number | null; // centavos, después de la tarifa
-  providerEvent?: string; // evento de Asaas tal cual (PAYMENT_RECEIVED), desde 0.2.9
-  providerStatus?: string; // payment.status de Asaas (RECEIVED, CONFIRMED...), desde 0.2.9
-  walletId?: string | null; // wallet de la subconta, del split; null sin split, desde 0.2.9
-  externalReference?: string | null; // externalReference sin tocar, desde 0.2.9
+  providerEvent?: string; // PAYMENT_RECEIVED
+  providerStatus?: string; // RECEIVED, CONFIRMED...
+  walletId?: string | null; // wallet de la subconta, del split
+  externalReference?: string | null; // sin tocar
 }
 ```
 
-Los cuatro campos de 0.2.9 son opcionales (patch): sirven para logs, diagnóstico y para no leer
-`raw`. El api no decide con ellos: relee el pago en Asaas (el evento es un disparador).
+El api no decide con `data`: relee el cobro en Asaas (el evento es un disparador).
 
-### Notificación del proveedor de pagos (webhooks → payments)
+### Cobros del store (Asaas, `/asaas`, publica webhooks)
 
-Desde que `payments.merkaly.io` es el único que habla con el proveedor de pagos, webhooks ya no
-traduce los eventos de Asaas: verifica el token y publica el cuerpo filtrado por una lista blanca.
-payments lo traduce y publica los `payment.*`, `payment.account.*` y `payment.transfer.*` de abajo
-con `producer: payments.merkaly.io`, mismos tipos, `data` e ids (`asaas:<evt_...>`). Contrato
-completo: repo payments, `docs/contract.md`.
-
-| Tipo | Org | `data` | Quién consume |
-| --- | --- | --- | --- |
-| `payment.provider.notified` | no siempre (el `?organization=` de los webhooks de subconta; los de cobro la llevan en el `externalReference` y la resuelve payments) | `{ payload: unknown; organization?: string }`, el cuerpo del proveedor sin datos del cliente, tarjeta, clave Pix ni factura | `payments.merkaly.io` (binding `payment.provider.#`) |
-
-Excepción a la regla de `raw`: acá el cuerpo del proveedor va en `data` porque traducirlo es justo
-el trabajo del consumidor. `id` = `asaas:<evt_...>#payment.provider.notified`, para no chocar con
-el id del evento traducido.
-
-### Pagos del store (Asaas, `/asaas`)
-
-Un solo webhook en la cuenta principal (split 100%): la organización sale del `externalReference` (`<orgId>:<saleId>`). Con `paymentId` el api lee el pago en Asaas y aplica
-`OrderSalePaymentService.apply()` (el mismo del polling), que confirma vía
-`OrderSaleService.confirmPayment` solo si el monto es exacto y la venta sigue `OPEN`. El evento es
-un **disparador**, no la fuente de verdad.
-
-| Tipo | Org | `data` | Eventos Asaas | Qué haría el api |
+| Tipo | Org | `data` | Eventos Asaas | Consumidor |
 | --- | --- | --- | --- | --- |
-| `payment.confirmed` | sí | `PaymentRef & { confirmedAt: string }` | `PAYMENT_CONFIRMED` | Releer y `apply()`: venta pagada. |
-| `payment.received` | sí | `PaymentRef & { receivedAt: string }` | `PAYMENT_RECEIVED` | Igual que `confirmed` (Pix llega directo acá, sin `CONFIRMED`); en tarjeta es el dinero liberado, idempotente. Evento separado para ver cuándo se libera el dinero. |
-| `payment.failed` | sí | `PaymentRef & { reason: 'card_refused' \| 'risk_rejected' }` | `PAYMENT_CREDIT_CARD_CAPTURE_REFUSED`, `PAYMENT_REPROVED_BY_RISK_ANALYSIS` | Marcar el intento REJECTED; el comprador reintenta. |
-| `payment.overdue` | sí | `PaymentRef & { dueDate: string }` | `PAYMENT_OVERDUE` | Informativo: el api ya vence el Pix a los 30 min con su propia ventana. |
-| `payment.cancelled` | sí | `PaymentRef` | `PAYMENT_DELETED` | Ignorar si no es el intento actual (el api borra los Pix que reemplaza). |
-| `payment.refunded` | sí | `PaymentRef & { refundedAmount: number; partial: boolean }` | `PAYMENT_REFUNDED`, `PAYMENT_PARTIALLY_REFUNDED` | Gateway REFUNDED y **alerta** al comerciante. No cambia el estado del pago a mano: el pago se deriva del pedido. |
-| `payment.chargeback.opened` | sí | `PaymentRef & { reason: string \| null }` | `PAYMENT_CHARGEBACK_REQUESTED` | Alerta en el pedido (cae en la subconta del comerciante). |
-| `payment.chargeback.updated` | sí | `PaymentRef & { stage: 'disputed' \| 'awaiting_reversal' }` | `PAYMENT_CHARGEBACK_DISPUTE`, `PAYMENT_AWAITING_CHARGEBACK_REVERSAL` | Actualizar la alerta. |
+| `payment.confirmed` | sí | `PaymentRef & { confirmedAt }` | `PAYMENT_CONFIRMED` | api: `syncSalePayment` |
+| `payment.received` | sí | `PaymentRef & { receivedAt }` | `PAYMENT_RECEIVED` | api: igual |
+| `payment.failed` | sí | `PaymentRef & { reason: 'card_refused' \| 'risk_rejected' }` | `PAYMENT_CREDIT_CARD_CAPTURE_REFUSED`, `PAYMENT_REPROVED_BY_RISK_ANALYSIS` | api: igual |
+| `payment.overdue` | sí | `PaymentRef & { dueDate }` | `PAYMENT_OVERDUE` | api: igual |
+| `payment.cancelled` | sí | `PaymentRef` | `PAYMENT_DELETED` | api: igual |
+| `payment.refunded` | sí | `PaymentRef & { refundedAmount; partial }` | `PAYMENT_REFUNDED`, `PAYMENT_PARTIALLY_REFUNDED` | api: igual |
+| `payment.refund.in_progress` | sí | `PaymentRef` | `PAYMENT_REFUND_IN_PROGRESS` | api: igual (`REFUNDED` llega después) |
+| `payment.split.failed` | sí | `PaymentRef & { reason: 'cancelled' \| 'divergence_block' }` | `PAYMENT_SPLIT_CANCELLED`, `PAYMENT_SPLIT_DIVERGENCE_BLOCK` | api: igual |
+| `payment.chargeback.opened` | sí | `PaymentRef & { reason: string \| null }` | `PAYMENT_CHARGEBACK_REQUESTED` | api: igual |
+| `payment.chargeback.updated` | sí | `PaymentRef & { stage: 'disputed' \| 'awaiting_reversal' }` | `PAYMENT_CHARGEBACK_DISPUTE`, `PAYMENT_AWAITING_CHARGEBACK_REVERSAL` | api: igual |
 
-### Subconta del comerciante (Asaas, KYC)
+### Subconta del comerciante (Asaas, KYC, publica webhooks)
 
-| Tipo | Org | `data` | Eventos Asaas | Qué haría el api |
+| Tipo | Org | `data` | Eventos Asaas | Consumidor |
 | --- | --- | --- | --- | --- |
-| `payment.account.approved` | sí | `{ provider: 'asaas'; accountId: string }` | `ACCOUNT_STATUS_GENERAL_APPROVAL_APPROVED` | Guardar `approval.general = APPROVED` (habilita `canSell`) y avisar. Hoy se relee en cada `GET /account`. |
-| `payment.account.rejected` | sí | `{ provider: 'asaas'; accountId: string }` | `ACCOUNT_STATUS_GENERAL_APPROVAL_REJECTED` | Guardar y avisar; el admin muestra `rejectReasons`. |
-| `payment.account.status_changed` | sí | `{ provider: 'asaas'; accountId: string; section: 'general' \| 'commercialInfo' \| 'documentation' \| 'bankAccountInfo'; status: 'PENDING' \| 'AWAITING_APPROVAL' \| 'APPROVED' \| 'REJECTED' \| 'EXPIRING_SOON' \| 'EXPIRED' }` | resto de `ACCOUNT_STATUS_*` | Actualizar `approval.<section>`. |
+| `payment.account.approved` | sí | `{ provider: 'asaas'; accountId }` | `ACCOUNT_STATUS_GENERAL_APPROVAL_APPROVED` | api: `refreshAccount` |
+| `payment.account.rejected` | sí | igual | `ACCOUNT_STATUS_GENERAL_APPROVAL_REJECTED` | api: igual |
+| `payment.account.status_changed` | sí | `{ provider: 'asaas'; accountId; section: 'general' \| 'commercialInfo' \| 'documentation' \| 'bankAccountInfo'; status: 'PENDING' \| 'AWAITING_APPROVAL' \| 'APPROVED' \| 'REJECTED' \| 'EXPIRING_SOON' \| 'EXPIRED' }` | resto de `ACCOUNT_STATUS_*` | api: igual |
 
-### Pedido y producto del proveedor (AliExpress, `/aliexpress`)
+### Transferencias de la subconta (Asaas, publica webhooks)
 
-El push trae el estado del pedido sin estado logístico ni motivo de cierre, que el api sí usa
-(`SupplierAliexpressOrderService.normalize`). Por eso el evento lleva un estado grueso y el api,
-dueño de `purchase.supplierOrder`, **resincroniza** con `OrderSupplierOrderService.sync()` (lee
-`ds.order.get`) en vez de confiar en el push.
+La organización sale del `?organization=` del webhook de la subconta. Llegan sin orden y al menos una
+vez.
 
-| Tipo | Org | `data` | Mensaje AliExpress | Qué haría el api |
+| Tipo | Org | `data` | Eventos Asaas | Consumidor |
 | --- | --- | --- | --- | --- |
-| `supplier.order.status_changed` | no (la resuelve el api por `sellerId`) | `{ provider: 'aliexpress'; sellerId: string; externalOrderId: string; reference: string \| null; providerStatus: string; status?: 'AWAITING_PAYMENT' \| 'PAID' \| 'SHIPPED' \| 'DELIVERED' \| 'CANCELLED' }` | 53 (`dropshipper_order_status_update`) | Resolver la organización, buscar la compra por `supplierOrder.externalOrderIds` y `sync()`. Contrato desde 0.2.11 (falta que webhooks lo publique). |
-| `supplier.order.tracking_updated` | no (la resuelve el api por `sellerId`) | `{ provider: 'aliexpress'; sellerId: string; externalOrderId: string; trackingNumbers: string[] }` | 18 (`waybill_changed`) | Resolver la organización y `sync()` (trae carrier y url; el comprador nunca ve el proveedor). |
-| `supplier.product.removed` | no (global) | `{ provider: 'aliexpress'; externalProductId: string }` | 15 (`product_deleted`) | **Recorrer las tiendas**, encontrar las que importaron ese producto, inactivar sus variantes y alertar. A futuro: índice inverso `externalProductId -> organizaciones`. |
-| `supplier.product.updated` | no (global) | `{ provider: 'aliexpress'; externalProductId: string; country?: string; event?: string; occurredAt?: string }` | 61 (`product_updated`, DropShip Product Update) | Pendiente hasta ver pushes reales: recorrer las tiendas que importaron el producto y releerlo en AliExpress (`OUT_OF_STOCK`: inactivar variantes y alertar). Implementado en 0.2.10 (solo el contrato; webhooks lo publica, el api aún no lo consume). |
+| `payment.transfer.created`, `.pending`, `.in_bank_processing`, `.blocked`, `.done`, `.failed`, `.cancelled` | sí | `{ provider: 'asaas'; transferId; amount; netAmount: number \| null; operationType: string \| null; providerEvent; providerStatus; externalReference: string \| null }` (centavos) | `TRANSFER_*` | api: `syncWithdrawal` |
 
-Mensaje 61: el cuerpo documentado es `{ item_id, country_code, update_event, event_time_stamps }`, pero no está
-confirmado si viene dentro de `data` o en la raíz del sobre; webhooks lee `data` y cae a la raíz.
-`externalProductId` = `item_id` como string, `country` = `country_code`, `event` = `update_event` sin
-tocar (solo `OUT_OF_STOCK` está documentado), `occurredAt` = `event_time_stamps` (milisegundos) en ISO.
-`id` = `aliexpress:61:<item_id>:<event_time_stamps>` (estable entre reintentos del mismo push); sin
-`event_time_stamps`, el hash del mensaje. Sin `item_id`: 200, log de aviso, no se publica.
+### Pedido y producto del proveedor (AliExpress, `/aliexpress`, publica webhooks)
 
-Estado grueso desde `orderStatus` del push (constante `AliexpressOrderStatus` del paquete):
+| Tipo | Org | `data` | Mensaje AliExpress | Consumidor |
+| --- | --- | --- | --- | --- |
+| `supplier.order.status_changed` | no (la resuelve el api por `sellerId`) | `SupplierOrderStatusChanged`: `{ provider: 'aliexpress'; sellerId; externalOrderId; reference: string \| null; providerStatus; status?: 'AWAITING_PAYMENT' \| 'PAID' \| 'SHIPPED' \| 'DELIVERED' \| 'CANCELLED' }` | 53 | api: resuelve la organización y `syncSupplierOrder` (relee `ds.order.get`); `sellerId` desconocido = rechazo |
+| `supplier.product.updated` | no (global) | `SupplierProductUpdated`: `{ provider: 'aliexpress'; externalProductId; country?; event?; occurredAt? }` | 61 | **nadie** (ver sección 8) |
+
+`providerStatus` es el `orderStatus` sin tocar (tipo `AliexpressOrderStatus`, unión de strings):
 
 | `providerStatus` | `status` |
 | --- | --- |
-| `OrderCreated`, `paymentFailedEvent` | `AWAITING_PAYMENT` (los pedidos DS se crean sin pagar) |
+| `OrderCreated`, `paymentFailedEvent` | `AWAITING_PAYMENT` |
 | `PaymentAuthorized` | `PAID` |
 | `OrderShipped` | `SHIPPED` |
 | `OrderConfirmed` | `DELIVERED` |
-| `OrderClosed` u otro | omitido (puede ser entregado o cancelado: decide `sync()`) |
+| `OrderClosed` u otro | omitido (decide `sync()`) |
 
-Resolución `seller_id -> organización` (en el api; webhooks no tiene base):
+Mensaje 61: `externalProductId` = `item_id` como string, `country` = `country_code`, `event` =
+`update_event` sin tocar (solo `OUT_OF_STOCK` documentado), `occurredAt` = `event_time_stamps` en ISO.
 
-| Pieza | Detalle |
-| --- | --- |
-| Fuente de verdad | Metadata de la organización en Auth0: `aliexpressSellerId`. La escribe el api cuando la tienda conecta AliExpress y la borra al desconectar. |
-| Por qué un índice | Auth0 no permite buscar organizaciones por metadata. |
-| Índice en memoria | `Map<sellerId, organization>` armado al arrancar listando las organizaciones, actualizado en connect y disconnect, y refrescado periódicamente. |
-| `sellerId` desconocido | Refrescar el índice una vez; si sigue sin aparecer, ack con warning en el log (reintentar no lo arregla). Igual con un pedido que no está en la tienda. |
-| A futuro (escala) | Colección global en Mongo `sellerId -> organization` con índice único. |
+### Identidad (Auth0, `/auth0`, publica webhooks)
 
-### Suscripción de Merkaly (Stripe, `/stripe`)
-
-La organización sale de `metadata.AUTH0_ORG_ID` (la escribe el api en customer y suscripción). Sin
-`AUTH0_ORG_ID`: 200 al proveedor, log de error, no se publica.
-
-| Tipo | Org | `data` | Eventos Stripe | Qué haría el api |
+| Tipo | Org | `data` | Origen Auth0 | Consumidor |
 | --- | --- | --- | --- | --- |
-| `subscription.invoice.paid` | sí | `{ provider: 'stripe'; invoiceId: string; subscriptionId: string; customerId: string; productId: string \| null; priceId: string \| null; amount: number; currency: string }` | `invoice.paid` | Lo que hoy hace `webhook/stripe.controller.ts`: guardar `productId` en `STRIPE_SUBSCRIPTION_PRODUCT` de la organización en Auth0. |
-| `subscription.invoice.payment_failed` | sí | `{ provider: 'stripe'; invoiceId: string; subscriptionId: string; customerId: string; amount: number; currency: string; attempt: number }` | `invoice.payment_failed` | Avisar al comerciante (hoy no se maneja). |
-| `subscription.updated` | sí | `{ provider: 'stripe'; subscriptionId: string; customerId: string; status: string; productId: string \| null; priceId: string \| null; currentPeriodEnd: string \| null; cancelAtPeriodEnd: boolean }` | `customer.subscription.created`, `customer.subscription.updated` | Foto del estado: sincronizar plan y estado. |
-| `subscription.cancelled` | sí | `{ provider: 'stripe'; subscriptionId: string; customerId: string; endedAt: string }` | `customer.subscription.deleted` | Quitar el plan de la organización. |
+| `identity.signup.requested` | no | `IdentitySignupRequested`: `{ user; email; company: { name; email? } }` | Action post-login (formulario de empresa) | api: `signupStore` (crea la organización con el usuario como miembro) |
+| `identity.organization.member.added` | sí | `data.object` de Auth0: `{ organization: { id; name? }; user: { user_id } }` | Event Streams `organization.member.added` | api: caché de miembros (`AccountUser`) |
+| `identity.organization.member.removed` | sí | igual | `organization.member.deleted` | api: marca `disabled` |
+| `identity.organization.member.role.assigned` | sí | igual + `role: { id; name }` | `organization.member.role.assigned` | api: guarda el rol |
+| `identity.organization.member.role.removed` | sí | igual que `role.assigned` | `organization.member.role.deleted` | api: quita el rol |
+| `identity.organization.created` | sí | `data.object` de Auth0: `{ id; name?; display_name?; metadata? }` | `organization.created` | api: `TenantService.reload` |
+| `identity.organization.updated` | sí | igual | `organization.updated` | api: igual |
+| `identity.organization.deleted` | sí | igual | `organization.deleted` | api: `TenantService.remove` |
 
-### Identidad (Auth0, `/auth0`, Event Streams, Log Streams y Actions)
+### Cuenta (publica el api)
 
-| Tipo | Org | `data` | Evento Auth0 | Qué haría el api |
+| Tipo | Org | `data` | Origen | Consumidor |
 | --- | --- | --- | --- | --- |
-| `identity.user.signed_up` | no | `{ userId: string; email: string \| null; connection: string \| null }` | log `ss` | Nada hoy: el onboarding (crear organización) sigue síncrono vía Action a `POST /auth0/onboarding`, porque el Action espera la respuesta. |
-| `identity.user.deleted` | no | `{ userId: string }` | log `du` | Marcar el `AccountUser` inactivo en las organizaciones donde exista. |
-| `identity.signup.requested` | no | `{ user: string; email: string; company: { name: string; email?: string } }` | Action post-login (formulario de empresa) | Crear la organización en Auth0 con el usuario como miembro (self-service signup). Implementado en 0.2.8. |
-| `identity.organization.member.added` | sí | `data.object` de Auth0 tal cual: `{ organization: { id: string; name?: string }; user: { user_id: string } }` | Event Streams `organization.member.added` | Guardar el miembro en el caché del equipo (`AccountUser`), con su rol leído de Auth0. |
-| `identity.organization.member.removed` | sí | igual que `member.added` | Event Streams `organization.member.deleted` | Marcar el `AccountUser` como `disabled` (no se borra). |
-| `identity.organization.member.role.assigned` | sí | igual que `member.added` + `role: { id: string; name: string }` (`name` = `ORG_ADMIN`...) | Event Streams `organization.member.role.assigned` | Guardar el rol en el caché. |
-| `identity.organization.member.role.removed` | sí | igual que `role.assigned` | Event Streams `organization.member.role.deleted` | Quitar el rol del caché si es el que tenía. |
-| `identity.organization.created` | sí | `data.object` de Auth0 tal cual: `{ id: string; name?: string; display_name?: string; metadata?: Record<string, string> }` | Event Streams `organization.created` | Releer la organización y sus discovery domains y sumarla al mapa de tiendas por host (`TenantService`). |
-| `identity.organization.updated` | sí | igual que `organization.created` | Event Streams `organization.updated` | Igual que `created` (nombre, metadata y dominios actuales). |
-| `identity.organization.deleted` | sí | igual que `organization.created` | Event Streams `organization.deleted` | Quitarla del mapa de tiendas. |
+| `account.user.linked` | no | `{ from; to }` (ids de Auth0: el vinculado, borrado, y el primario) | cambio de contraseña que vincula una identidad existente | api: `reassignUserReferences` en todas las organizaciones |
 
-`organization` se completa cuando el log trae `organization_id`, pero no es obligatoria: en signup y
-borrado el usuario no pertenece a una organización en ese momento.
-En los `identity.organization.member.*` sí es obligatoria: sale de `data.object.organization.id`. Su `data` es el
-`data.object` de Auth0 sin traducir (fuente confiable, schema oficial de Event Streams).
-En `identity.organization.created|updated|deleted` sale de `data.object.id`. Auth0 no emite eventos
-de discovery domains: el api los relee al recibir `created`/`updated` y en un refresco completo cada hora.
+Hoy se publica en segundo plano (`runInBackground`): si el broker falla, solo queda el log (outbox:
+fase 5).
 
-### Comandos de notificación (api → signals)
+### Comandos de notificación (signals)
 
-El api pide un envío y sigue: no espera respuesta (no es request-reply). Mismo exchange y sobre que
-los eventos; el `type` es un comando (sección 2). `signals.merkaly.io` los consume con **una cola por
-canal**; hoy solo email. `id` = clave de idempotencia: el productor usa un id estable por envío (p. ej.
-el id de la notificación en su base) para que un reenvío no mande dos emails. `organization` va en el
-sobre cuando el envío es de una tienda.
+`signals` consume con **una cola por canal**; hoy solo email. `id` = clave de idempotencia estable
+por envío para que un reenvío no mande dos emails.
 
-| Tipo | Org | `data` | Cola | Qué hace el consumidor |
+| Tipo | Org | `data` | Cola | Consumidor |
 | --- | --- | --- | --- | --- |
-| `email.send` | según el envío | `{ to: string \| string[]; cc?: string \| string[]; subject: string; text: string }` (`text` en texto plano, se escapa en la parte html) | `signals.merkaly.io-emails` | Envía con el transporte de `@nestjs/mail` configurado. Proveedor caído o error transitorio: `.retry`. Datos inválidos o rechazo permanente del proveedor (dirección inválida, contenido rechazado): `ack` con log de error, sin reintento. Un `id` ya enviado se descarta (memoria del proceso; persistente pendiente). |
+| `email.send` | según el envío | `{ to: string \| string[]; cc?: string \| string[]; subject; text }` | `merkaly.signals-emails` | signals: envía; error transitorio `.retry`, dato inválido o rechazo permanente `ack` con log; dedup en memoria por `id` |
 
-Routing key = `email.send`; el consumidor liga una key por handler (`@OnMerkalyEvent('email.send')`), no
-`email.#`. A futuro, `sms.send` en `signals.merkaly.io-sms` y `whatsapp.send` en
-`signals.merkaly.io-whatsapp`, cada uno con su consumidor, sin tocar al productor.
+Nadie lo publica todavía (el api lo hará con `command('signals', 'email.send', ...)`). A futuro
+`sms.send` y `whatsapp.send` en `merkaly.signals-sms` y `merkaly.signals-whatsapp`.
 
-### Lo que NO se traduce
-
-Se responde 200 al proveedor, se **descarta con log en debug** y no se publica (sin evento
-`webhook.unmapped`).
-
-| Proveedor | Eventos | Por qué |
-| --- | --- | --- |
-| Asaas | `PAYMENT_CREATED`, `PAYMENT_UPDATED`, `PAYMENT_RESTORED`, `PAYMENT_AUTHORIZED`, `PAYMENT_AWAITING_RISK_ANALYSIS`, `PAYMENT_APPROVED_BY_RISK_ANALYSIS` | Estados intermedios que el api provoca o ya lee (IN_PROCESS) en el polling; ningún consumidor actúa sobre ellos. |
-| Asaas | `PAYMENT_BANK_SLIP_*`, `PAYMENT_CHECKOUT_VIEWED`, `PAYMENT_DUNNING_*`, `PAYMENT_ANTICIPATED`, `PAYMENT_RECEIVED_IN_CASH_UNDONE` | Boleto, checkout hospedado, cobranza y anticipo: Merkaly no los usa (solo Pix y tarjeta 1x con formulario propio). |
-| Asaas | `PAYMENT_REFUND_IN_PROGRESS`, `PAYMENT_REFUND_DENIED` | El hecho relevante es `payment.refunded`. Se agregan (patch) si hace falta mostrar el proceso. |
-| Asaas | `PAYMENT_SPLIT_*` | El cobro se crea directo en la subconta del comerciante, sin split. |
-| Stripe | todos los demás (`customer.*`, `invoice.created`, `payment_intent.*`, ...) | El api solo necesita factura pagada o fallida y el ciclo de la suscripción. |
-| Auth0 | `s` (login ok), `slo`, `sv`, `scp`, `scpr`, `sce`, `sapi`, `fapi`, `fs` | Volumen alto o ruido; el api ya sincroniza el usuario en cada request autenticado (`account.user.sync.requested`). |
-| Auth0 | `f`, `fp`, `fu` (login fallido), `limit_wc` (usuario bloqueado) | Fuera del catálogo por ahora; entran (patch) cuando haya consumidor de alertas de seguridad. |
-| Auth0 | eventos de Actions no registrados (incluido `user_login` del post-login) | Se agregan al catálogo cuando exista un Action con consumidor. |
-| AliExpress | 1 a 12, 20, 41 | Mensajes de pedidos del lado vendedor; Merkaly es comprador DS y solo usa 53 (pedido) y 61 (producto). |
-| AliExpress | 0 (`test_push`) | Botón de prueba de la consola, solo se loguea. |
-
-## 5. Routing
-
-| Regla | Detalle |
-| --- | --- |
-| Patrón | `type` es el patrón de Nest RMQ (`{ pattern, data }`) y la routing key. El consumidor usa `@OnMerkalyEvent('payment.confirmed')`. |
-| Exchange | `merkaly.events`, topic. El productor publica ahí con `type` como routing key y **nunca nombra una cola**. Decidido el 2026-11-02: con cola directa el productor quedaba acoplado al consumidor. |
-| Cola por consumidor | `<repo>[-<trabajo>]`: el nombre del repo que consume (`api.merkaly.io`, `payments.merkaly.io`) y, si el repo separa trabajos, un guion y el trabajo (`signals.merkaly.io-emails`; a futuro `api.merkaly.io-orders`). El paquete agrega `.retry` y `.dlq` (`signals.merkaly.io-emails.retry`, `signals.merkaly.io-emails.dlq`). La declara el consumidor y Nest la liga a cada tipo con handler; un consumidor nuevo no toca al productor. Sin consumidor ligado, el exchange descarta el mensaje: el consumidor tiene que haber arrancado al menos una vez. |
-| Dead letter | `<cola>.dlq`, vía `x-dead-letter-exchange` de la cola principal. |
-| Cola sin consumir | Argumentos de la cola principal: `x-message-ttl` 7 días, `x-max-length` 10.000, `x-overflow: drop-head`, dead letter a la `.dlq`. Solo el consumidor declara la cola, así que no hay choque de argumentos; cambiarlos exige borrar la cola. |
-| Reintento del productor | `publish` espera el ack del broker; si falla, el webhook responde 503 y el proveedor reintenta (Asaas pausa la cola de webhooks tras fallos seguidos, hay que vigilarlo). |
-| Reintento del consumidor | `EventsConsumer.handle`. Éxito: `ack`. Error transitorio (red, Mongo, Asaas caído): copia a `<cola>.retry` (TTL 30 s, vuelve a la principal) y `ack`; tras 5 intentos (cabecera `x-merkaly-retries`) va a la `.dlq`. Rechazo de negocio (`EventRejectedException`: venta inexistente, monto distinto, venta cerrada): `ack` y log visible, sin reintento. |
-| Idempotencia | El consumidor deduplica por `id`. v1 sin persistencia: cada handler es idempotente por diseño (`confirmPayment` ya tolera el `ConflictException` concurrente; `sync()` es lectura). Después: colección de eventos procesados con índice único en `id` y TTL de 30 días. |
-| Orden | No garantizado (`received` puede llegar antes que `confirmed`). Los handlers releen el estado real en el proveedor y usan `occurredAt` para descartar fotos viejas (`subscription.updated`). |
-
-## 6. Versionado
-
-| Cambio | Release del paquete | `version` del evento |
-| --- | --- | --- |
-| Tipo de evento nuevo | ninguno (no toca el paquete) | se documenta en el catálogo |
-| Campo opcional nuevo en `data` | patch | igual |
-| Quitar o renombrar un campo, cambiar tipo o significado | minor | +1 (`PaymentConfirmedV1` y `V2` conviven) |
-| Quitar un tipo | minor, tras `@deprecated` y la ventana | n/a |
-
-Cambio incompatible:
-
-1. Paquete minor con la `version` nueva.
-2. Los consumidores aceptan N y N+1 y se despliegan.
-3. El productor pasa a emitir N+1 (siempre una sola versión por tipo).
-4. Ventana de deprecación: **30 días** o hasta que la cola no tenga mensajes N, lo que sea más largo.
-5. Los consumidores quitan N (otro minor quita la interfaz vieja).
-
-Un consumidor que recibe una `version` que no conoce hace `nack` sin requeue (va a la `.dlq`, no se
-pierde).
-
-## 7. Plan de migración
-
-| Paso | Repo | Release | Qué |
-| --- | --- | --- | --- |
-| 1 | nest | minor (0.2.0) | `MerkalyEvent<K>`, `MerkalyEventType`, `EventDataMap` (pagos y subconta), `MerkalyProducer`, `EventsPublisher.emit` al exchange, `EventsConsumer` (ack, `.retry`, `.dlq`, `around` para el contexto del app). Se quitan `WebhookEvent`, `WebhookPatterns`, `toPattern` y `createWebhookEvent` (nadie los importaba: webhooks tenía su copia). |
-| 2 | webhooks | patch | Asaas traducido a `payment.*` con `emit`, `raw` saneado, `value` de reais a centavos. Stripe, Auth0 y AliExpress: se descartan con log hasta tener su traducción (nadie los consume; Stripe y Auth0 siguen llegando directo al api). |
-| 3 | infra | n/a | Borrar la cola vieja `api.merkaly.io-queue` (mensajes crudos sin consumidor). La cola nueva la crea el api al arrancar. |
-| 4 | api | patch | Consumidor de `payment.*` y `payment.account.*` en la cola `api.merkaly.io`. El endpoint del store lee solo Mongo y el checkout sigue el cobro por SSE; queda una relectura lenta en Asaas como red de seguridad si no llega el evento. |
-| 5 | nest + webhooks + api | patch | Resto del catálogo por proveedor: AliExpress (`supplier.*`, con `aliexpressSellerId` e índice), Stripe (`subscription.*`, mover el webhook del api), Auth0 (`identity.*`). |
-| 7 | nest + webhooks + api | minor (0.3.0) | Se quitan `MerkalyEventType` y `EventDataMap`: `type` pasa a string y `MerkalyEvent<T>` a genérico. Productores y consumidores usan los strings del catálogo. |
-| 6 | payments + webhooks | n/a (2026-11-22) | `payments.merkaly.io` consume `payment.provider.notified` en su cola y publica los `payment.*` traducidos con `producer: payments.merkaly.io`; webhooks deja de traducir Asaas. Los comandos del api (`payments.*`) y el chequeo de movimientos siguen, un paso por PR (repo payments, `docs/contract.md`). |
-
-## 8. Decisiones
-
-| Tema | Decisión |
-| --- | --- |
-| Nombres | `<dominio>.<entidad>.<hecho>`, segmentos con punto (`supplier.order.status_changed`). |
-| `payment.confirmed` y `payment.received` | Separados. |
-| Eventos no traducidos | Webhooks responde 200 y deja la línea en warn (`no listener declared for this event`); sin `webhook.unmapped`. |
-| Organización en AliExpress | `aliexpressSellerId` en la metadata de la organización en Auth0 (fuente de verdad) + índice en memoria `sellerId -> organización` en el api (Auth0 no busca por metadata). Desconocido: refresco y luego `.dlq`. A escala: colección global en Mongo. |
-| `supplier.product.removed` | Sin organización; el api recorre las tiendas. A futuro: índice inverso. |
-| `supplier.product.updated` | Igual que `removed`: global. `id` determinista `aliexpress:61:<item_id>:<event_time_stamps>`; `update_event` como string libre. |
-| Auth0 login fallido y bloqueo | Fuera del catálogo por ahora. |
-| Stripe sin `AUTH0_ORG_ID` | 200, log de error, no se publica. |
-| Tipado | `type` string del catálogo, `data` genérico (`MerkalyEvent<T>`, `emit<T>(type, data)`); el handler declara la forma que espera. `raw` opcional en todos, `unknown`, 16 KB, saneado, nunca leído por consumidores. |
-| Routing | Exchange topic `merkaly.events` desde ya (2026-11-02); cola por consumidor `<repo>[-<trabajo>]`. |
-| Cola sin consumir | 7 días / 10.000 mensajes. |
-| Comandos de notificación | `<canal>.send` sin prefijo de servicio (`email.send`) en `merkaly.events`, una cola por canal (`signals.merkaly.io-emails`). Hoy un servicio consume una sola cola de eventos: `rabbitConsumerOptions` liga todos los `@OnMerkalyEvent` del transporte RMQ a cada cola que se conecte, así que la segunda cola de signals necesitará un transport id por cola (como `@OnMerkalyRequest`). |
-
-## 9. Request-reply
-
-Para quien necesita una respuesta en el momento (el proveedor espera el body). Primer caso:
-`payment.withdrawal.authorize` (webhooks pregunta al api si aprueba un saque de Asaas).
-
-| Regla | Detalle |
-| --- | --- |
-| Exchange | `merkaly.requests`, topic, routing key = tipo. Separado de `merkaly.events`: la cola de eventos del api está ligada a `#` y se llevaría los pedidos. |
-| Cola | `<cola>.requests` (`api.merkaly.io.requests`), durable (RabbitMQ 4 rechaza colas transitorias no exclusivas), `noAck`, sin `.retry` ni `.dlq`, `x-message-ttl` 30 s, `x-max-length` 1.000 con `drop-head`. La declara quien responde con `rabbitRequestsOptions`. |
-| Respuesta | Direct reply-to (`amq.rabbitmq.reply-to`) del `ClientProxy.send` de Nest, con `correlationId`. Sin cola de respuesta. |
-| Sobre | `MerkalyRequest<T>` = `MerkalyEvent<T>` + `expiresAt` (ISO, ahora + timeout). El mensaje lleva `expiration` = timeout y no es persistente. |
-| Vencido | El broker lo descarta en la cola; si igual llega, el consumidor lo descarta sin correr el handler (`WARN expired, dropped`), sin responder. |
-| Timeout | `request(type, data, { timeout })`, 5 s por defecto. Sin respuesta: `GatewayTimeoutException`; handler con error o broker sin configurar: `ServiceUnavailableException`. Quien pregunta decide el fallback (webhooks responde `REFUSED`). |
-| Sin consumidor | Si nadie ligó el tipo, el exchange descarta el pedido y quien pregunta recibe el timeout. |
-| Aislamiento | `@OnMerkalyRequest` usa el transport id `Symbol.for('merkaly.requests')`: el servidor de eventos no liga esos tipos y el de pedidos no ve los `@OnMerkalyEvent`. Un evento con el mismo nombre que un pedido va solo al handler de eventos. |
-| Contexto | El handler corre fuera del contexto del app (sin CLS, guards ni interceptors globales); abre el suyo si lo necesita. |
-| Montos | Como en los eventos: `data` en centavos enteros; el valor crudo del proveedor solo en `raw`. |
-
-| Tipo | Quién pregunta | Quién responde | `data` | Respuesta |
-| --- | --- | --- | --- | --- |
-| `payment.withdrawal.authorize` | webhooks (`POST /asaas/withdrawals`) | api | `{ transfer: { id, amount, externalReference, operationType } }` (`amount` en centavos enteros, el `value` en reais de Asaas solo en `raw`; nunca la clave Pix) | `{ status: 'APPROVED' }` o `{ status: 'REFUSED', refuseReason }` |
-| `payment.refund.authorize` | webhooks (`POST /asaas/withdrawals`) | api | `{ refund: { id, payment, amount } }` (`amount` en centavos, `payment` = cobro devuelto) | `{ status: 'APPROVED' }` o `{ status: 'REFUSED', refuseReason }` |
-
-Pedidos que responde `payments.merkaly.io` (aprobados 2026-11-22, se implementan uno por PR). El
-prefijo `payments.` nombra al servicio que responde, para no confundirlos con los que responde el
-api (`payment.withdrawal.authorize`, `payment.refund.authorize`). Tipos de `data` y respuesta en el
-repo payments (`src/types/gateway.types.ts`), sin nombres, estados ni unidades del proveedor.
+### Invokes que responde el api
 
 | Tipo | Quién pregunta | `data` | Respuesta |
 | --- | --- | --- | --- |
-| `payments.account.create` | api | `{ holder }` | `{ account: { id, credentials }, approval }` (`credentials` opacas, cifradas por payments) |
-| `payments.account.approval.read` | api | `{ account }` | aprobación por sección |
-| `payments.account.holder.update` | api | `{ account, holder }` | aprobación por sección |
-| `payments.charge.create` / `.read` / `.search` / `.delete` / `.refund` | api | `{ account, charge }`, `{ chargeId }`, `{ reference }`, `{ chargeId, refund }` | `PaymentCharge` (o lista) |
-| `payments.fees.read` | api | `{}` | `{ pix }` en centavos |
-| `payments.balance.read` | api | `{ account }` | `{ available, pending, nextCreditAt }` |
-| `payments.transfer.create` / `.read` | api | `{ account, transfer }`, `{ account, transferId }` | `PaymentTransfer` |
-| `payments.movement.check` | webhooks (`POST /asaas/withdrawals`) | `{ payload }` | el body que espera el proveedor; payments pregunta al api `payment.withdrawal.authorize` o `payment.refund.authorize` en términos de Merkaly |
+| `payment.withdrawal.authorize` | webhooks (`POST /asaas/withdrawals`, timeout 3 s) | `{ transfer: { id, amount, externalReference, operationType } }` (`amount` en centavos; nunca la clave Pix) | `{ status: 'APPROVED' }` o `{ status: 'REFUSED', refuseReason }` |
+| `payment.refund.authorize` | webhooks (mismo endpoint) | `{ refund: { id, payment, amount } }` (centavos) | igual |
+
+## 8. Desajustes conocidos (catálogo vs código)
+
+Publicado y sin consumidor:
+
+- `supplier.product.updated`: con `mandatory`, el `emit` de webhooks rechaza con
+  `UnroutableMessageException` (503) y AliExpress reintenta. Antes de migrar webhooks (fase 4) hay
+  que decidir: ligarlo a una cola (`merkaly.api-supplier`, aunque el handler solo haga `ack`) o
+  atrapar `UnroutableMessageException` en ese listener y responder 200.
+
+Consumido y sin productor:
+
+- `payment.refund.denied`: el api lo escucha (`sale.payment.listener`), webhooks no lo publica
+  (`PAYMENT_REFUND_DENIED` no se traduce). Decidir si se agrega en webhooks o se quita del api.
+- `email.send`: signals lo consume, nadie lo publica todavía.
+
+Documentado antes y sin código (ni productor ni consumidor), queda como propuesta:
+
+| Tipo | Nota |
+| --- | --- |
+| `identity.user.signed_up`, `identity.user.deleted` | logs `ss` y `du` de Auth0 |
+| `supplier.order.tracking_updated` | mensaje 18 de AliExpress |
+| `supplier.product.removed` | mensaje 15 de AliExpress |
+| `subscription.invoice.paid`, `.invoice.payment_failed`, `subscription.updated`, `subscription.cancelled` | Stripe: no hay webhook de Stripe en webhooks |
+
+Con claves exactas nada de esto se liga hasta que tenga handler.
+
+## 9. payments (pendiente de migración)
+
+`payments.merkaly.io` sigue en 0.4.x, fuera de esta migración: declara `payments.merkaly.io` ligada a
+`merkaly.events` con `payment.provider.#`, conecta una cola de pedidos sin handlers y re-emite los
+`payment.*` traducidos con `producer: payments.merkaly.io`. En master de webhooks **nadie publica**
+`payment.provider.notified` y webhooks sigue traduciendo Asaas, así que hoy payments no recibe nada.
+
+Cuando entre: exchange `merkaly.payments`, sus eventos `payment.*` saldrían de ahí (los
+consumidores cambian `from: 'webhooks'` por `from: 'payments'`), y sus invokes sin el servicio en el
+nombre (`payment.charge.create` en vez de `payments.charge.create`). Contrato del servicio: repo
+payments, `docs/contract.md`.
+
+## 10. Lo que no se traduce
+
+Webhooks responde 200 al proveedor, descarta con log y no publica (sin `webhook.unmapped`).
+
+| Proveedor | Eventos | Por qué |
+| --- | --- | --- |
+| Asaas | `PAYMENT_CREATED`, `PAYMENT_UPDATED`, `PAYMENT_RESTORED`, `PAYMENT_AUTHORIZED`, `PAYMENT_AWAITING_RISK_ANALYSIS`, `PAYMENT_APPROVED_BY_RISK_ANALYSIS` | Estados intermedios que el api provoca o ya lee. |
+| Asaas | `PAYMENT_BANK_SLIP_*`, `PAYMENT_CHECKOUT_VIEWED`, `PAYMENT_DUNNING_*`, `PAYMENT_ANTICIPATED`, `PAYMENT_RECEIVED_IN_CASH_UNDONE` | Merkaly no los usa (solo Pix y tarjeta 1x). |
+| Asaas | `PAYMENT_REFUND_DENIED` | Sin traducción hoy (ver sección 8). |
+| Auth0 | logins, `slo`, `sv`, `scp`, `sapi`, fallidos y bloqueos | Volumen alto o sin consumidor. |
+| AliExpress | 1 a 12, 20, 41; 0 (`test_push`) | Lado vendedor o prueba; Merkaly es comprador DS (53 y 61). |
+
+## 11. Versionado
+
+| Cambio | Release del paquete | `version` del mensaje |
+| --- | --- | --- |
+| Tipo nuevo | ninguno (no toca el paquete) | se documenta en el catálogo |
+| Campo opcional nuevo en `data` | ninguno, o patch si hay interfaz exportada | igual |
+| Quitar o renombrar un campo, cambiar tipo o significado | minor si hay interfaz exportada | +1 (conviven N y N+1) |
+
+Cambio incompatible de `data`: los consumidores aceptan N y N+1 y se despliegan, el productor pasa a
+N+1, ventana de 30 días, los consumidores quitan N. Un consumidor que recibe una `version` que no
+conoce manda el mensaje a la `.dlq`.
+
+## 12. Pendientes (fase 5 y siguientes)
+
+- Revisar `x-overflow: drop-head` y los 10.000 mensajes de las colas principales.
+- Alerta de `.dlq` (ENG-116), inbox persistente (ENG-112), outbox en el api.
+- Broker caído en el arranque (ENG-87): hoy el publisher falla en el momento, sin buffer.
+- Cola de un solo consumidor entre entornos: sin vhosts, un servicio local con el `RABBITMQ_URL` de
+  producción compite por los mensajes. En local, `RABBITMQ_URL` vacío.
+- Limpieza manual de la topología de 0.4 cuando migren los servicios: exchanges `merkaly.events` y
+  `merkaly.requests`; colas `api.merkaly.io` (+ `.retry`, `.dlq`, `.requests`) y
+  `signals.merkaly.io-emails` (+ `.retry`, `.dlq`).
+
+## 13. Historia
+
+| Versión | Cambio |
+| --- | --- |
+| 0.2.0 | Sobre `MerkalyEvent`, exchange `merkaly.events`, `EventsConsumer` con `.retry` y `.dlq`. |
+| 0.3.0 | Sin `MerkalyEventType` ni `EventDataMap`: `type` string y `data` genérico. |
+| 0.3.1 | Request-reply en `merkaly.requests`. |
+| 0.5.0 | Exchange y colas por servicio, claves exactas, `mandatory`, confirmación antes del ack al reintentar, `@HandleEvent` / `@HandleCommand` / `@HandleInvoke`, `emit` / `command` / `invoke`. Sin `MerkalyProducer` (`producer` es el nombre corto), `MerkalyRequest` pasa a `MerkalyInvoke`, `AliexpressOrderStatus` es solo un tipo. |

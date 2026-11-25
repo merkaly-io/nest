@@ -1,27 +1,22 @@
 import { ModuleMetadata } from '@nestjs/common';
-import { ClientProxy } from '@nestjs/microservices';
-import { MerkalyEvent, MerkalyEventMeta, MerkalyProducer } from '../events';
+import { MerkalyEvent, MerkalyEventMeta } from '../events';
 import { LoggerService } from '../logger';
+import { assertServiceName } from './rabbit.names';
 
 export const RABBIT_OPTIONS = Symbol('RABBIT_OPTIONS');
-export const RABBIT_CLIENT = Symbol('RABBIT_CLIENT');
-export const RABBIT_REQUEST_CLIENT = Symbol('RABBIT_REQUEST_CLIENT');
-export const MERKALY_REQUESTS = Symbol.for('merkaly.requests'); // transport id of @OnMerkalyRequest
 export const CONSUMER_OPTIONS = Symbol('CONSUMER_OPTIONS');
 
-export const MERKALY_EXCHANGE = 'merkaly.events'; // topic, routing key = event type
 export const DEFAULT_PUBLISH_TIMEOUT = 5000;
+export const DEFAULT_INVOKE_TIMEOUT = 5000;
 export const DEFAULT_RETRIES = 5;
 export const DEFAULT_RETRY_DELAY = 30_000;
-export const MERKALY_REQUESTS_EXCHANGE = 'merkaly.requests'; // topic, routing key = request type
-export const DEFAULT_REQUEST_TIMEOUT = 5000;
-export const REQUESTS_QUEUE_TTL = 30_000; // cap for any request left in the queue
+export const DEFAULT_PREFETCH = 10;
+export const INVOKES_QUEUE_TTL = 30_000; // cap for any invoke left in the queue
 
 export interface RabbitModuleOptions {
   url?: string; // broker url, unset = publishing disabled
-  producer: MerkalyProducer; // this service, stamped on every event
-  exchange?: string; // default merkaly.events
-  timeout?: number; // ms to wait for the broker, default 5000
+  service: string; // short name (api): own exchange merkaly.<service> and producer of every message
+  timeout?: number; // ms to wait for the broker confirm, default 5000
   required?: boolean; // fail boot when url is missing
 }
 
@@ -30,16 +25,23 @@ export interface RabbitModuleAsyncOptions extends Pick<ModuleMetadata, 'imports'
   inject?: any[];
 }
 
-export interface RabbitConsumerOptions {
+export interface RabbitQueueOptions {
   url: string;
-  queue: string; // owned by the consumer, named after its repo (api.merkaly.io)
-  exchange?: string; // default merkaly.events
+  service: string; // owner, the queue is merkaly.<service>-<queue>
+  queue: string; // work name (payments), same as in @HandleEvent / @HandleCommand
   prefetchCount?: number; // default 10
   retries?: number; // transient failures before the .dlq, default 5
   retryDelay?: number; // ms in the .retry queue, default 30s
+  logger?: LoggerService;
 }
 
-export interface EventsConsumerOptions extends Pick<RabbitConsumerOptions, 'queue' | 'retries'> {
+export interface RabbitInvokesOptions {
+  url: string;
+  service: string; // owner, the queue is merkaly.<service>-invokes
+  logger?: LoggerService;
+}
+
+export interface EventsConsumerOptions {
   around?: (event: MerkalyEvent, next: () => Promise<unknown>) => Promise<unknown>; // e.g. CLS per message
 }
 
@@ -48,17 +50,17 @@ export interface EventsConsumerAsyncOptions extends Pick<ModuleMetadata, 'import
   inject?: any[];
 }
 
-export interface RabbitRequestsOptions {
-  url: string;
-  queue: string; // same name as the events queue, requests go to <queue>.requests
-  exchange?: string; // default merkaly.requests
-  logger?: LoggerService;
-}
-
-export interface MerkalyRequestOptions extends MerkalyEventMeta {
+export interface MerkalyInvokeOptions extends MerkalyEventMeta {
   timeout?: number; // ms to wait for the reply, default 5000
 }
 
-export type RabbitClient = ClientProxy;
-
 export type BrokerStatus = 'disabled' | 'connecting' | 'connected' | 'disconnected';
+
+// Fails boot with a clear error instead of publishing to a wrong exchange
+export function checkRabbitOptions(options: RabbitModuleOptions): RabbitModuleOptions {
+  assertServiceName(options?.service);
+
+  if (!options.url && options.required) throw new Error('RabbitMQ url is required');
+
+  return options;
+}

@@ -1,8 +1,8 @@
 # @merkaly/nest
 
-Pacote compartilhado dos backends NestJS da Merkaly (api, webhooks, payments). Faz duas coisas:
+Pacote compartilhado dos backends NestJS da Merkaly (api, webhooks, signals, payments). Faz duas coisas:
 
-1. **Fonte única de versões**: fixa `@nestjs/*`, rxjs, amqplib, class-validator, dotenv e também o tooling de desenvolvimento (ESLint, Prettier, TypeScript, typescript-eslint, Nest CLI, ts-node, `@types/node`).
+1. **Fonte única de versões**: fixa `@nestjs/*` (versão exata, todos os serviços rodam a mesma), rxjs, amqplib, class-validator, dotenv e também o tooling de desenvolvimento (ESLint, Prettier, TypeScript, typescript-eslint, Nest CLI, ts-node, `@types/node`).
 2. **Infraestrutura comum**: RabbitMQ (publisher + consumidor), contrato de eventos de webhook, logger, filtro de exceções, env e assinaturas.
 
 Proposta e motivação: [docs/proposal.md](docs/proposal.md).
@@ -26,7 +26,7 @@ strict-peer-dependencies=false
 ```json
 {
   "dependencies": {
-    "@merkaly/nest": "^0.1.7"
+    "@merkaly/nest": "^0.5.0"
   }
 }
 ```
@@ -42,10 +42,10 @@ import {
   requestLogger, requestOrigin, requestContext, noteRequest, bodyParsers, bodyParserReason, // uma linha por request
   noIndex, // X-Robots-Tag noindex + /robots.txt bloqueando buscadores
   AbstractExceptionFilter, ExceptionsFilter, rememberError, // filtros (motivo do erro para o log)
-  RabbitModule, EventsPublisher, EventsConsumer, EventRejectedException, // eventos
-  rabbitConsumerOptions, assertConsumerTopology, OnMerkalyEvent,
-  rabbitRequestsOptions, OnMerkalyRequest, MerkalyRequest, // request-reply
-  MerkalyEvent, MerkalyProducer, createMerkalyEvent, AliexpressOrderStatus,
+  RabbitModule, EventsPublisher, EventsConsumer, EventRejectedException, UnroutableMessageException, // mensagens
+  rabbitQueue, rabbitInvokes, HandleEvent, HandleCommand, HandleInvoke, // consumidores
+  exchangeName, queueName, invokesQueueName, RabbitNameError, // nomes por convenção
+  MerkalyEvent, MerkalyInvoke, createMerkalyEvent, AliexpressOrderStatus, PaymentRef, // sobre e tipos de data
   SignatureGuard, safeCompare, hmacDigest, verifyHmac,
 } from '@merkaly/nest';
 ```
@@ -58,7 +58,7 @@ import {
     LoggerModule.forRoot({ service: 'webhooks.merkaly.io' }), // global
     RabbitModule.forRoot({
       url: env.string('RABBITMQ_URL'), // sem url: emit rejeita com 503
-      producer: MerkalyProducer.WEBHOOKS, // vai em todo evento
+      service: 'webhooks', // exchange merkaly.webhooks e producer de toda mensagem
       timeout: env.number('RABBITMQ_PUBLISH_TIMEOUT', 5000),
       required: env.isProduction, // produção não sobe sem url
     }),
@@ -68,9 +68,9 @@ import {
 export class AppModule {}
 ```
 
-`RabbitModule.forRootAsync({ imports, inject, useFactory })` aceita a config injetada.
+`RabbitModule.forRootAsync({ imports, inject, useFactory })` aceita a config injetada. O `service` é validado no boot (`^[a-z][a-z0-9-]*$`).
 
-**Exchange e filas**: o produtor publica no exchange topic `merkaly.events` com o tipo do evento como routing key e nunca conhece uma fila. Cada consumidor declara a sua fila, com o nome do repositório (`api.merkaly.io`, `payments.merkaly.io`), e o Nest a liga a cada tipo que ele escuta. Um consumidor novo não toca no produtor.
+**Exchange e filas**: cada serviço tem o seu exchange topic `merkaly.<serviço>` e publica nele os seus eventos; comandos e invokes vão para o exchange do destino. Cada serviço declara as suas filas, uma por trabalho (`merkaly.api-payments`, `merkaly.signals-emails`), ligadas com chaves exatas (nunca `#`) a um ou mais exchanges. Um consumidor novo não toca no produtor, mas precisa existir antes: toda publicação usa `mandatory` e falha se nenhuma fila liga a chave. Modelo completo em [`docs/events.md`](docs/events.md).
 
 **Health check**: o pacote não registra controllers. O Swagger servido em `/` responde 200 e funciona como health check.
 
@@ -124,94 +124,85 @@ LoggerModule.forRootAsync({
 
 **Filtros**: o filtro não loga; guarda o motivo (e o stack de 5xx) em `response.locals` e o `requestLogger` imprime. `ExceptionsFilter` responde `{ statusCode, message, path, timestamp }`. Para filtros próprios, estender `AbstractExceptionFilter` (resposta padrão do Nest, sem o log duplicado do `ExceptionsHandler`) e usar `this.remember(response, motivo, trace?)` quando responder por conta própria.
 
-### Eventos
+### Mensagens
 
-Contrato completo em [`docs/events.md`](docs/events.md). Eventos de negócio normalizados (`payment.received`, nunca `asaas.payment_received`): se o provedor muda, o consumidor não muda.
+Contrato completo e catálogo em [`docs/events.md`](docs/events.md). Mensagens de negócio normalizadas (`payment.received`, nunca `asaas.payment_received`): se o provedor muda, o consumidor não muda. O `type` é uma string do catálogo (pontos, minúsculas, validada no boot); o pacote não exporta enums de serviços nem de mensagens, só os tipos de `data` (`PaymentRef`, `SupplierOrderStatusChanged`, `IdentitySignupRequested`...).
 
-Grupos (o primeiro segmento do tipo):
-
-| Grupo | Tipos | Origem |
-| --- | --- | --- |
-| `payment.*` | cobranças do store e subconta do comerciante (`payment.account.*`) | Asaas |
-| `identity.*` | identidade: `identity.signup.requested` (usuário novo sem organização preenche o formulário da empresa no Action post-login; o api cria a organização com ele como membro) | Auth0 |
-| `supplier.*` | produto do fornecedor: `supplier.product.updated` (mensagem 61 do AliExpress, ex. sem estoque); pedido do fornecedor: `supplier.order.status_changed` (mensagem 53) | AliExpress |
-
-Desde 0.3.0 o `type` de um evento é uma string do catálogo (`docs/events.md`) e `MerkalyEvent<T>` é genérico em `data`: não existem mais `MerkalyEventType` nem `EventDataMap`, e um evento novo não exige publicar o pacote. As interfaces de `data` (`PaymentRef`, `SupplierOrderStatusChanged`...) continuam exportadas para quem quiser tipar o handler.
-
-Os eventos `payment.*` de cobrança levam `PaymentRef`: `provider`, `paymentId`, `saleId`, `method`, `amount` e `netAmount` (centavos) e, desde 0.2.9, os opcionais `providerEvent` (ex. `PAYMENT_RECEIVED`), `providerStatus`, `walletId` (subconta do split) e `externalReference` (sem tocar), para diagnóstico sem ler `raw`.
-
-`identity.signup.requested` leva `data: { user, email, company: { name, email? } }` (id do usuário no Auth0, ex. `auth0|abc`); o momento é o `occurredAt` do evento, sem campo próprio.
-
-`supplier.product.updated` (desde 0.2.10) leva `data: { provider: 'aliexpress', externalProductId, country?, event?, occurredAt? }`: `externalProductId` é o `item_id` como string (passa de 2^53), `event` é o `update_event` sem tocar (`OUT_OF_STOCK`; os outros valores não estão documentados) e `occurredAt` vem de `event_time_stamps`. É global, sem `organization`: o consumidor procura as lojas que importaram o produto.
-
-`supplier.order.status_changed` (desde 0.2.11) leva `data: { provider: 'aliexpress', sellerId, externalOrderId, reference, providerStatus, status? }`: `sellerId` é o `seller_id` da conta AliExpress do comerciante (o api resolve a organização por ele), `externalOrderId` é o id do pedido DS como string, `providerStatus` é o `orderStatus` sem tocar e `status` é o estado grosso (omitido quando ambíguo, ex. `OrderClosed`). O api relê o pedido no AliExpress em vez de confiar no push.
+| Classe | Publica | Exchange | Handler | Resposta |
+| --- | --- | --- | --- | --- |
+| Evento | `emit(type, data, meta?)` | o próprio | `@HandleEvent(type, { queue, from })` | não |
+| Comando | `command(service, type, data, meta?)` | o do destino | `@HandleCommand(type, { queue })` | não |
+| Invoke | `invoke(service, type, data, { timeout, ...meta })` | o do destino | `@HandleInvoke(type)` | sim |
 
 ```ts
-// produtor: o tipo é uma string do catálogo (docs/events.md); resolve com o evento ou ServiceUnavailableException (o provedor reintenta)
+// produtor: resolve com o evento quando o broker confirmou e roteou; senão ServiceUnavailableException
+// (UnroutableMessageException se nenhuma fila liga o tipo). O provedor recebe 503 e reenvia.
 await this.events.emit('payment.received', { ...paymentRef, receivedAt }, {
   id: `asaas:${body.id}`, source: 'asaas', organization, occurredAt, raw: { type: body.event, payload },
 });
+
+await this.events.command('signals', 'email.send', { to, subject, text }, { id: notification.id });
 ```
 
 Consumidor:
 
 ```ts
-// main.ts
-const consumer = { url, queue: 'api.merkaly.io' };
-await assertConsumerTopology(consumer); // cria .retry e .dlq
-app.connectMicroservice(rabbitConsumerOptions(consumer));
+// main.ts: um servidor por fila, cada um com o seu transport id
+const rabbit = { url, service: 'api', logger: app.get(LoggerService) };
+app.connectMicroservice(rabbitQueue({ ...rabbit, queue: 'payments' })); // merkaly.api-payments (+ .retry, .dlq)
+app.connectMicroservice(rabbitQueue({ ...rabbit, queue: 'identity', retries: 5, retryDelay: 30_000 }));
+app.connectMicroservice(rabbitInvokes(rabbit)); // merkaly.api-invokes
 await app.startAllMicroservices();
 
 // módulo: `around` roda cada mensagem dentro do contexto do app (ex.: CLS com a organização)
 RabbitModule.forConsumerAsync({
   inject: [ClsService],
   useFactory: (cls: ClsService) => ({
-    queue: 'api.merkaly.io',
     around: (event, next) => cls.run(() => { cls.set('identity', event.organization); return next(); }),
   }),
 });
 
-// handler
-@OnMerkalyEvent('payment.received')
-received(@Payload() event: MerkalyEvent<PaymentRef & { receivedAt: string }>, @Ctx() context: RmqContext) {
-  return this.consumer.handle(event, context, (e) => this.payments.refresh(e.data.saleId));
+// handler (controller): chaves exatas; várias chaves e decoradores empilhados na mesma fila
+@HandleEvent(['payment.confirmed', 'payment.received'], { queue: 'payments', from: 'webhooks' })
+payment(@Payload() event: MerkalyEvent<PaymentRef>, @Ctx() context: RmqContext) {
+  return this.consumer.handle(event, context, (e) => this.payments.refresh(e.data.paymentId));
 }
+
+@HandleEvent('identity.signup.requested', { queue: 'identity', from: 'webhooks' })
+@HandleEvent('account.user.linked', { queue: 'identity', from: 'api' }) // dois exchanges, uma fila
+identity(@Payload() event: MerkalyEvent, @Ctx() context: RmqContext) { ... }
 ```
 
-`@OnMerkalyEvent(...types)` aceita vários tipos no mesmo handler. `EventsConsumer.handle` fecha a mensagem e loga uma linha (`ORIGIN` = serviço que publicou, ex. `webhooks.merkaly.io`, `SCOPE` = organização, `KIND` = `EVENT`):
+Os handlers ficam em controllers. A mesma chave duas vezes na mesma fila derruba o boot (o Nest rodaria os dois e haveria ack duplo). `EventsConsumer.handle` fecha a mensagem e loga uma linha (`ORIGIN` = serviço que publicou, ex. `webhooks`, `SCOPE` = organização, `KIND` = `EVENT`):
 
 | Resultado | O que acontece |
 | --- | --- |
 | Sucesso | `ack`. |
 | `EventRejectedException` (venda inexistente, valor diferente...) | `ack` + `WARN`: reintentar não resolve. |
-| Outro erro (Mongo, rede, provedor fora) | Vai para `<fila>.retry` (30 s) e volta; depois de 5 tentativas, `<fila>.dlq`. |
+| Outro erro (Mongo, rede, provedor fora) | Cópia em `<fila>.retry` (30 s) e `ack` só depois da confirmação do broker; se a cópia falha, `nack` com requeue. Depois de 5 tentativas, `<fila>.dlq`. |
 | Malformado ou `version` maior que a do handler | `<fila>.dlq` direto. |
 
 A fila principal descarta para a `.dlq` o que ficar 7 dias sem consumo ou passar de 10.000 mensagens.
 
-### Request-reply (síncrono)
+### Invoke (request-reply)
 
-Para quem precisa de uma resposta na hora (ex. webhooks responde ao Asaas se um saque é aprovado). Detalhes em [`docs/events.md`](docs/events.md#9-request-reply).
+Para quem precisa de uma resposta na hora (ex. webhooks responde ao Asaas se um saque é aprovado).
 
 ```ts
 // quem pergunta: resolve com o retorno do handler; GatewayTimeoutException sem resposta no prazo,
-// ServiceUnavailableException se o handler falhou ou o broker não está configurado
-const answer = await this.events.request<Req, Res>('payment.withdrawal.authorize', data, { timeout: 3000 });
+// ServiceUnavailableException se o handler falhou ou o broker não está disponível,
+// UnroutableMessageException se ninguém liga o tipo
+const answer = await this.events.invoke<Req, Res>('api', 'payment.withdrawal.authorize', data, { timeout: 3000 });
 
-// main.ts de quem responde, ao lado de rabbitConsumerOptions (mesmo { url, queue })
-app.connectMicroservice(rabbitRequestsOptions({ ...consumer, logger: app.get(LoggerService) }));
-
-// handler (controller): o retorno é a resposta
-@OnMerkalyRequest('payment.withdrawal.authorize')
-authorize(@Payload() request: MerkalyRequest<Req>): Promise<Res> { ... }
+// handler (controller) de quem responde: o retorno é a resposta
+@HandleInvoke('payment.withdrawal.authorize')
+authorize(@Payload() invoke: MerkalyInvoke<Req>): Promise<Res> { ... }
 ```
 
-- Exchange próprio `merkaly.requests` (topic), nunca o `merkaly.events`: a fila de eventos, ligada a `#`, não recebe pedidos.
-- Fila `<fila>.requests` não durável, sem `.retry` nem `.dlq`, `noAck`, TTL 30 s. Um pedido perdido vira timeout em quem perguntou.
-- Resposta via direct reply-to (`amq.rabbitmq.reply-to`), sem fila de resposta.
-- O sobre leva `expiresAt` (agora + timeout) e a mensagem `expiration` = timeout: vencido, o broker descarta na fila e o consumidor descarta sem rodar o handler (`WARN expired, dropped`).
-- `@OnMerkalyRequest` usa um transport id próprio: o servidor de eventos não liga esses tipos e o de pedidos não vê os `@OnMerkalyEvent`.
-- Uma linha por pedido em quem responde (`REQUEST:: <tipo> (<id>) ok 12ms`, `ORIGIN` = quem perguntou, `SCOPE` = organização). Dentro de um request HTTP, quem pergunta soma `=> <tipo> 12ms` à linha do request.
+- Fila `merkaly.<serviço>-invokes` no exchange de quem responde, `noAck`, sem `.retry` nem `.dlq`, TTL 30 s. Um invoke perdido vira timeout em quem perguntou.
+- Resposta via direct reply-to (`amq.rabbitmq.reply-to`) com `correlationId`.
+- O sobre leva `expiresAt` e a mensagem `expiration` = timeout: vencido, o broker e o servidor o descartam (`WARN expired, dropped`).
+- Uma linha por invoke em quem responde (`INVOKE:: <tipo> (<id>) ok 12ms`). Dentro de um request HTTP, quem pergunta soma `=> <tipo> 12ms` à linha do request.
 - O handler roda fora do contexto do app (sem CLS, guards nem interceptors globais): abre o próprio (`cls.run`) se precisar.
 
 ### Env
@@ -230,4 +221,4 @@ pnpm lint
 pnpm build
 ```
 
-Release: tag `vX.Y.Z` (igual à versão do `package.json`) publica no npm.
+Release: tag `vX.Y.Z` (ou prerelease `vX.Y.Z-rc.N`) publica no npm com essa versão; o `package.json` do master fica em `0.0.0`.
