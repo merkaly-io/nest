@@ -41,8 +41,29 @@ export interface RabbitInvokesOptions {
   logger?: LoggerService;
 }
 
+export interface InboxEntry {
+  queue: string; // merkaly.<service>-<work> that consumed it
+  eventId: string; // MerkalyEvent.id
+  type: string;
+}
+
+// Optional dedupe (ENG-112): the app stores what each queue already processed, the package stays storage free
+export interface EventsInbox {
+  has(entry: InboxEntry): Promise<boolean>; // true: ack and skip the handler
+  add(entry: InboxEntry): Promise<unknown>; // after the handler succeeded, before the ack
+}
+
+export interface DeadLetter {
+  queue?: string; // queue of origin, the message is now in <queue>.dlq
+  type?: string;
+  id?: string;
+  reason: string;
+}
+
 export interface EventsConsumerOptions {
   around?: (event: MerkalyEvent, next: () => Promise<unknown>) => Promise<unknown>; // e.g. CLS per message
+  inbox?: EventsInbox;
+  onDeadLetter?: (letter: DeadLetter) => unknown; // alert hook, runs after the error log; its errors are logged
 }
 
 export interface EventsConsumerAsyncOptions extends Pick<ModuleMetadata, 'imports'> {
