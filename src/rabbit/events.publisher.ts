@@ -101,6 +101,16 @@ export class EventsPublisher implements OnApplicationBootstrap, OnApplicationShu
     return this.send(this.options.service, type, data, meta);
   }
 
+  // Delivered event: an outside fact handed to its owner, on merkaly.<service> (gateway)
+  public deliver<T>(
+    service: string,
+    type: string,
+    data: T,
+    meta?: MerkalyEventMeta,
+  ): Promise<MerkalyEvent<T>> {
+    return this.send(service, type, data, meta);
+  }
+
   // Command: an order for `service` (no reply), on its exchange merkaly.<service>
   public command<T>(
     service: string,
