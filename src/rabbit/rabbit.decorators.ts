@@ -19,7 +19,7 @@ export const INVOKES_TRANSPORT = Symbol.for('merkaly.invokes');
 
 export interface HandleEventOptions {
   queue: string; // work name of the own queue (payments -> merkaly.<service>-payments)
-  from: string; // owner of the exchange the event lands on (payments -> merkaly.payments), own included
+  from?: string; // another owner's exchange (payments -> merkaly.payments); omitted = own exchange
 }
 
 export interface HandleCommandOptions {
@@ -65,9 +65,9 @@ function bindQueue(decorator: string, types: Types, queue: string, from: string 
   };
 }
 
-// Reacts to a fact on merkaly.<from>, emitted by its owner or delivered by a gateway; exact keys only
+// Reacts to a fact on merkaly.<from> (own exchange without from), emitted or delivered; exact keys only
 export const HandleEvent = (types: Types, { queue, from }: HandleEventOptions) =>
-  bindQueue('HandleEvent', types, queue, from);
+  bindQueue('HandleEvent', types, queue, from ?? null);
 
 // Runs an order sent to this service with publisher.command(): bound to the own exchange
 export const HandleCommand = (types: Types, { queue }: HandleCommandOptions) =>
