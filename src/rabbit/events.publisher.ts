@@ -70,7 +70,7 @@ export class EventsPublisher implements OnApplicationBootstrap, OnApplicationShu
     return this.brokerStatus;
   }
 
-  // Own exchange, where emit() publishes
+  // Own exchange, where emit() publishes; asserted on the first emit, never by a gateway
   public get exchange() {
     return exchangeName(this.options.service);
   }
@@ -205,15 +205,12 @@ export class EventsPublisher implements OnApplicationBootstrap, OnApplicationShu
     this.channel.on('error', (error: unknown) =>
       this.logger.error({ group: GROUP, message: `Channel setup failed: ${describeError(error)}` }),
     );
-
-    this.exchanges.set(this.exchange, Promise.resolve()); // asserted by setup
   }
 
   // Runs on every (re)connection
   private async setup(channel: ConfirmChannel) {
     channel.on('return', (message: ConsumeMessage) => this.onReturn(message));
 
-    await channel.assertExchange(this.exchange, 'topic', { durable: true });
     await channel.consume(REPLY_TO, (message) => this.onReply(message), { noAck: true });
   }
 
@@ -285,7 +282,7 @@ export class EventsPublisher implements OnApplicationBootstrap, OnApplicationShu
       .finally(() => this.returned.delete(publishId));
   }
 
-  // Commands and invokes go to another service's exchange: assert it once (same topic and durable args)
+  // Lazy: each destination exchange (own included) is asserted on its first publish, then on every reconnect
   private assertExchange(channel: ChannelWrapper, exchange: string, ms: number): Promise<void> {
     const known = this.exchanges.get(exchange);
 
