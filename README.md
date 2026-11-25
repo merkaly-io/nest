@@ -159,6 +159,8 @@ RabbitModule.forConsumerAsync({
   inject: [ClsService],
   useFactory: (cls: ClsService) => ({
     around: (event, next) => cls.run(() => { cls.set('identity', event.organization); return next(); }),
+    inbox: { has: (entry) => inbox.has(entry), add: (entry) => inbox.add(entry) }, // opcional: dedupe por { queue, eventId }
+    onDeadLetter: (letter) => alerts.notify(letter), // opcional: alerta, depois da linha ERROR [DLQ]
   }),
 });
 
@@ -181,8 +183,10 @@ Os handlers ficam em controllers. A mesma chave duas vezes na mesma fila derruba
 | `EventRejectedException` (venda inexistente, valor diferente...) | `ack` + `WARN`: reintentar não resolve. |
 | Outro erro (Mongo, rede, provedor fora) | Cópia em `<fila>.retry` (30 s) e `ack` só depois da confirmação do broker; se a cópia falha, `nack` com requeue. Depois de 5 tentativas, `<fila>.dlq`. |
 | Malformado ou `version` maior que a do handler | `<fila>.dlq` direto. |
+| Já processado (com `inbox`) | `ack` sem rodar o handler. |
+| Sem handler para a chave ou `pattern` diferente da routing key | `<fila>.dlq` (nunca `ack` silencioso). |
 
-A fila principal descarta para a `.dlq` o que ficar 7 dias sem consumo ou passar de 10.000 mensagens.
+Todo descarte para a `.dlq` loga uma linha `ERROR` no grupo `DLQ`. A fila principal descarta para a `.dlq` o que ficar 7 dias sem consumo; o limite de 10.000 mensagens e a `.dlq` de 14 dias vêm das operator policies do broker (`docs/events.md`, "Límites y políticas del broker").
 
 ### Invoke (request-reply)
 

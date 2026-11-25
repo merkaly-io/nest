@@ -1,6 +1,6 @@
 # Mensajería entre servicios (RabbitMQ)
 
-Estado: **`@merkaly/nest` 0.5.0** (ENG-129, fase 2 de la migración a RabbitMQ por servicio). Un
+Estado: **`@merkaly/nest` 0.5.1** (ENG-129 y ENG-132, fases 2 y 5 de la migración a RabbitMQ por servicio). Un
 exchange por servicio, varias colas por servicio con claves exactas, publisher confirms con
 `mandatory` y decoradores `@HandleEvent`, `@HandleCommand` y `@HandleInvoke`. Reemplaza a
 `merkaly.events`, `merkaly.requests`, `@OnMerkalyEvent` y `@OnMerkalyRequest` (0.4.x), sin
@@ -129,11 +129,12 @@ comandos, y `{ pattern, data, id }` para invokes (Nest responde a los paquetes c
 | Bindings | Una clave **exacta** por tipo con handler, nunca `#` ni `*`. Una cola puede ligar claves de varios exchanges. |
 | Transporte | Cada cola tiene su transport id (`Symbol.for('merkaly.queue:<trabajo>')`, invokes `Symbol.for('merkaly.invokes')`): los handlers de una cola nunca se ligan a otra. |
 | Clave repetida | Dos handlers de la misma clave en la misma cola hacen fallar el boot (Nest correría los dos y habría doble ack). |
-| Patrón | El `pattern` del cuerpo tiene que ser la routing key cuando el mensaje llega por un exchange; si no, se descarta a la `.dlq`. Lo que vuelve de `.retry` llega por el exchange por defecto y no se valida. |
-| Sin consumidor | Todo publish va con `mandatory`: si ninguna cola liga la clave, el broker devuelve el mensaje y la promesa rechaza con `UnroutableMessageException` (503). El productor no pierde mensajes en silencio; webhooks responde 5xx y el proveedor reintenta. Corolario: **la cola del consumidor tiene que existir antes** de que el productor publique (desplegar primero al consumidor). |
+| Patrón | El `pattern` del cuerpo tiene que ser la routing key cuando el mensaje llega por un exchange; si no, va a la `.dlq` con una línea `ERROR [DLQ]`. Lo que vuelve de `.retry` llega por el exchange por defecto y no se valida. |
+| Sin consumidor | Todo publish va con `mandatory`: si ninguna cola liga la clave, el broker devuelve el mensaje y la promesa rechaza con `UnroutableMessageException` (503). El productor no pierde mensajes en silencio; webhooks responde 5xx y el proveedor reintenta. Corolario: **la cola del consumidor tiene que existir antes** de que el productor publique (desplegar primero al consumidor). Por eso no hay alternate exchange (ENG-89): con claves exactas y `mandatory`, lo que no tiene destino ya falla en el productor, y un alternate exchange lo convertiría en un éxito para el productor con el mensaje guardado aparte. |
+| Sin handler | Un mensaje que llega a una cola sin handler para su clave (binding viejo, tipo renombrado) no se confirma: `nack` sin requeue, va a la `.dlq` con una línea `ERROR [DLQ] ... has no handler` (ENG-115). |
 | Confirmación | Publisher confirms: `emit` y `command` resuelven cuando el broker tomó y enrutó el mensaje. Timeout 5 s (`timeout` del módulo). |
-| Broker caído | Falla en el momento (`ServiceUnavailableException`, "not connected"), sin buffer silencioso. Con la conexión arriba pero el canal ocupado, el mensaje espera como máximo el timeout y se descarta del buffer. |
-| Cola sin consumir | Argumentos de la cola principal (sin cambios desde 0.4): `x-message-ttl` 7 días, `x-max-length` 10.000, `x-overflow: drop-head`, dead letter a la `.dlq`. Cambiarlos exige borrar la cola. **TODO fase 5**: revisar `drop-head` (bajo presión descarta los más viejos a la `.dlq`). |
+| Broker caído | Falla en el momento (`ServiceUnavailableException`, "not connected"), sin buffer silencioso (ENG-87). Con la conexión arriba pero el canal ocupado o reconectando, el mensaje espera como máximo el timeout y se descarta del buffer. Un timeout no garantiza que el broker no lo haya recibido: el reintento del productor puede duplicar, y por eso el consumidor deduplica (inbox). |
+| Cola sin consumir | Argumentos de la cola principal (congelados desde 0.4): `x-message-ttl` 7 días, `x-max-length` 10.000, `x-overflow: drop-head`, dead letter a la `.dlq`. En producción la operator policy `merkaly-work` pasa el overflow a `reject-publish-dlx` (ver "Límites y políticas del broker"). |
 | Bindings viejos | El paquete liga, no desliga: si se quita un handler, la clave queda ligada en el broker y sus mensajes van a la `.dlq` (sin handler). Desligar a mano (management UI o `rabbitmqadmin`). |
 
 ### Reintentos del consumidor (`EventsConsumer.handle`)
@@ -148,6 +149,63 @@ comandos, y `{ pattern, data, id }` para invokes (Nest responde a los paquetes c
 La cola de origen (para `.retry` y `.dlq`) la conoce el servidor que consumió el mensaje, nunca el
 payload. `retries` y `retryDelay` son por cola (`rabbitQueue({ retries, retryDelay })`).
 
+Todo mensaje que va a una `.dlq` deja **una línea `ERROR` en el grupo `DLQ`** con el tipo, el id, el
+motivo y la `.dlq` de destino. Además, `RabbitModule.forConsumer({ onDeadLetter })` recibe
+`{ queue, type, id, reason }` de los que descarta el consumidor (para mandar una alerta; si falla,
+solo se loguea). Los que descarta el servidor (sin handler, patrón distinto) solo dejan la línea.
+
+### Límites y políticas del broker
+
+Los argumentos de una cola no se pueden cambiar: el broker rechaza la redeclaración con otros valores
+(`PRECONDITION_FAILED`) y cambiarlos exige borrar la cola. Por eso el código mantiene los argumentos
+de 0.4 y los límites se ajustan con **operator policies**, que el broker aplica sobre colas ya
+existentes y que, a diferencia de las policies comunes, ganan al argumento `x-overflow` (en
+`max-length` y `message-ttl` gana el menor).
+
+| Policy | Patrón | Definición | Efecto |
+| --- | --- | --- | --- |
+| `merkaly-work` | `^merkaly\.[a-z][a-z0-9-]*-[a-z][a-z0-9-]*(?<!-invokes)$` | `{"max-length":10000,"overflow":"reject-publish-dlx"}` | Cola principal llena: el broker rechaza lo nuevo con `basic.nack` (el publish falla, webhooks responde 5xx y el proveedor reintenta) y deja una copia en la `.dlq`. No toca `.retry`, `.dlq` ni `-invokes`. |
+| `merkaly-dlq` | `^merkaly\..+\.dlq$` | `{"message-ttl":1209600000}` | La `.dlq` guarda cada mensaje 14 días (ENG-116). |
+
+Por qué `reject-publish-dlx` y no `reject-publish`: lo que vuelve de `.retry` a una cola llena entra
+por dead letter, sin confirmación hacia nadie; con `reject-publish` se perdería, con `-dlx` termina en
+la `.dlq`. El costo es una copia de más en la `.dlq` cuando el productor reintenta. `drop-head`
+(el default de 0.4) descartaba los más viejos, que son justamente los que más esperaron.
+
+Sin las policies (local, entornos nuevos) las colas siguen con `drop-head`: solo importa con más de
+10.000 mensajes sin consumir.
+
+Aplicar (una vez por broker; idempotente):
+
+```bash
+rabbitmqctl set_operator_policy merkaly-work '^merkaly\.[a-z][a-z0-9-]*-[a-z][a-z0-9-]*(?<!-invokes)$' \
+  '{"max-length":10000,"overflow":"reject-publish-dlx"}' --apply-to queues --priority 10
+rabbitmqctl set_operator_policy merkaly-dlq '^merkaly\..+\.dlq$' \
+  '{"message-ttl":1209600000}' --apply-to queues --priority 10
+rabbitmqctl list_operator_policies
+```
+
+Con el plugin de management, lo mismo por HTTP (`%2f` es el vhost `/`):
+
+```bash
+curl -u "$USER:$PASS" -X PUT -H 'content-type: application/json' \
+  "$MANAGEMENT_URL/api/operator-policies/%2f/merkaly-work" \
+  -d '{"pattern":"^merkaly\\.[a-z][a-z0-9-]*-[a-z][a-z0-9-]*(?<!-invokes)$","definition":{"max-length":10000,"overflow":"reject-publish-dlx"},"priority":10,"apply-to":"queues"}'
+curl -u "$USER:$PASS" -X PUT -H 'content-type: application/json' \
+  "$MANAGEMENT_URL/api/operator-policies/%2f/merkaly-dlq" \
+  -d '{"pattern":"^merkaly\\..+\\.dlq$","definition":{"message-ttl":1209600000},"priority":10,"apply-to":"queues"}'
+```
+
+Verificar: `rabbitmqctl list_queues name policy operator_policy effective_policy_definition`.
+
+### Vigilar la `.dlq` (ENG-116)
+
+- Logs: buscar `[DLQ]` en los logs del servicio (Railway). Cada línea es un mensaje descartado.
+- Broker: `rabbitmqctl list_queues name messages | grep '\.dlq'`, o la pestaña Queues del management
+  filtrando por `\.dlq$`. Cualquier valor mayor que 0 merece revisión.
+- Reprocesar: corregir la causa y mover los mensajes con la shovel del management (`<cola>.dlq` →
+  `<cola>`); con inbox, los que ya se procesaron se saltan.
+
 ### Invokes
 
 | Regla | Detalle |
@@ -161,8 +219,13 @@ payload. `retries` y `retryDelay` son por cola (`rabbitQueue({ retries, retryDel
 
 ### Idempotencia y orden
 
-- El consumidor deduplica por `id`. Hoy sin persistencia (cada handler es idempotente por diseño;
-  signals deduplica en memoria). Inbox persistente: fase 5 (ENG-112).
+- Inbox opcional (ENG-112): `RabbitModule.forConsumer({ inbox: { has, add } })`. Antes del handler,
+  `has({ queue, eventId, type })` en `true` hace `ack` y salta el handler (`WARN duplicate, skipped`);
+  después del éxito, `add(...)` y luego el `ack`. Si `has` falla, cuenta como error transitorio
+  (`.retry`); si `add` falla, se loguea y se hace `ack` igual (el handler ya corrió). Los rechazos
+  (`EventRejectedException`) no se anotan. El paquete no guarda nada: el almacenamiento es del app
+  (el api usa Mongo con índice único `{ queue, eventId }` y TTL de 30 días). Una caída entre el
+  handler y el `add` puede repetir el handler en la redelivery: los handlers siguen siendo idempotentes.
 - Orden no garantizado (`received` puede llegar antes que `confirmed`): los handlers releen el estado
   real en el proveedor.
 
@@ -361,9 +424,8 @@ conoce manda el mensaje a la `.dlq`.
 
 ## 12. Pendientes (fase 5 y siguientes)
 
-- Revisar `x-overflow: drop-head` y los 10.000 mensajes de las colas principales.
-- Alerta de `.dlq` (ENG-116), inbox persistente (ENG-112), outbox en el api.
-- Broker caído en el arranque (ENG-87): hoy el publisher falla en el momento, sin buffer.
+- Aplicar las operator policies `merkaly-work` y `merkaly-dlq` en producción (sección 5).
+- Alerta activa de la `.dlq` (hoy: línea `[DLQ]` y hook `onDeadLetter`, sin destino configurado).
 - Cola de un solo consumidor entre entornos: sin vhosts, un servicio local con el `RABBITMQ_URL` de
   producción compite por los mensajes. En local, `RABBITMQ_URL` vacío.
 - Limpieza manual de la topología de 0.4 cuando migren los servicios: exchanges `merkaly.events` y
@@ -377,4 +439,5 @@ conoce manda el mensaje a la `.dlq`.
 | 0.2.0 | Sobre `MerkalyEvent`, exchange `merkaly.events`, `EventsConsumer` con `.retry` y `.dlq`. |
 | 0.3.0 | Sin `MerkalyEventType` ni `EventDataMap`: `type` string y `data` genérico. |
 | 0.3.1 | Request-reply en `merkaly.requests`. |
+| 0.5.1 | Inbox opcional (`inbox: { has, add }`), hook `onDeadLetter` y línea `[DLQ]` en cada descarte, mensajes sin handler o con patrón distinto a la `.dlq` con error. Límites por operator policy (`reject-publish-dlx`, TTL de 14 días en la `.dlq`). |
 | 0.5.0 | Exchange y colas por servicio, claves exactas, `mandatory`, confirmación antes del ack al reintentar, `@HandleEvent` / `@HandleCommand` / `@HandleInvoke`, `emit` / `command` / `invoke`. Sin `MerkalyProducer` (`producer` es el nombre corto), `MerkalyRequest` pasa a `MerkalyInvoke`, `AliexpressOrderStatus` es solo un tipo. |
