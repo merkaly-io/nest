@@ -43,7 +43,7 @@ import {
   noIndex, // X-Robots-Tag noindex + /robots.txt bloqueando buscadores
   AbstractExceptionFilter, ExceptionsFilter, rememberError, // filtros (motivo do erro para o log)
   RabbitModule, EventsPublisher, EventsConsumer, EventRejectedException, UnroutableMessageException, MerkalyRoute, // mensagens
-  rabbitQueue, rabbitInvokes, HandleEvent, HandleCommand, HandleInvoke, // consumidores
+  rabbitQueue, rabbitInvokes, HandleEvent, HandleCommand, HandleInvoke, InvokeError, // consumidores
   exchangeName, queueName, invokesQueueName, RabbitNameError, // nomes por convenção
   MerkalyEvent, MerkalyInvoke, createMerkalyEvent, AliexpressOrderStatus, PaymentRef, // sobre e tipos de data
   SignatureGuard, safeCompare, hmacDigest, verifyHmac,
@@ -197,8 +197,8 @@ Todo descarte para a `.dlq` loga uma linha `ERROR` no grupo `DLQ`. A fila princi
 Para quem precisa de uma resposta na hora (ex. webhooks responde ao Asaas se um saque é aprovado).
 
 ```ts
-// quem pergunta: resolve com o retorno do handler; GatewayTimeoutException sem resposta no prazo,
-// ServiceUnavailableException se o handler falhou ou o broker não está disponível,
+// quem pergunta: resolve com o retorno do handler; HttpException com o mesmo status e mensagem se o handler lançou,
+// GatewayTimeoutException sem resposta no prazo, ServiceUnavailableException se o broker não está disponível,
 // UnroutableMessageException se ninguém liga o tipo
 const answer = await this.events.invoke<Req, Res>({ service: 'api', type: 'payment.withdrawal.authorize' }, data, { timeout: 3000 });
 
@@ -210,7 +210,8 @@ authorize(@Payload() invoke: MerkalyInvoke<Req>): Promise<Res> { ... }
 - Fila `merkaly.<serviço>-invokes` no exchange de quem responde, `noAck`, sem `.retry` nem `.dlq`, TTL 30 s. Um invoke perdido vira timeout em quem perguntou.
 - Resposta via direct reply-to (`amq.rabbitmq.reply-to`) com `correlationId`.
 - O sobre leva `expiresAt` e a mensagem `expiration` = timeout: vencido, o broker e o servidor o descartam (`WARN expired, dropped`).
-- Uma linha por invoke em quem responde (`INVOKE:: <tipo> (<id>) ok 12ms`). Dentro de um request HTTP, quem pergunta soma `=> <tipo> 12ms` à linha do request.
+- Erros passam: o handler lança a sua `HttpException` (`new NotFoundException('Charge not found')`) e a resposta leva `{ status, message, code? }` (`code` sai do corpo da exceção, se existir). Quem pergunta recebe uma `HttpException` com o mesmo status e mensagem; `code` fica em `getResponse()`. Outro erro qualquer vira 500 `Internal server error` (a mensagem real só no log de quem responde).
+- Uma linha por invoke em quem responde (`INVOKE:: <tipo> (<id>) ok 12ms`, ou `failed 404 "Charge not found" 12ms`). Dentro de um request HTTP, quem pergunta soma `=> <tipo> 12ms` à linha do request.
 - O handler roda fora do contexto do app (sem CLS, guards nem interceptors globais): abre o próprio (`cls.run`) se precisar.
 
 ### Env

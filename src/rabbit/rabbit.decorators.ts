@@ -1,9 +1,11 @@
+import { UseFilters } from '@nestjs/common';
 import { EventPattern, MessagePattern } from '@nestjs/microservices';
 import {
   PATTERN_EXTRAS_METADATA,
   PATTERN_METADATA,
   TRANSPORT_METADATA,
 } from '@nestjs/microservices/constants';
+import { InvokeExceptionFilter } from './invoke.filter';
 import { assertMessageType, assertServiceName, assertWorkName } from './rabbit.names';
 
 export const MERKALY_EXTRAS = 'merkaly'; // key of the handler extras read by the queue servers
@@ -73,7 +75,7 @@ export const HandleEvent = (types: Types, { queue, from }: HandleEventOptions) =
 export const HandleCommand = (types: Types, { queue }: HandleCommandOptions) =>
   bindQueue('HandleCommand', types, queue, null);
 
-// Answers publisher.invoke() on merkaly.<service>-invokes: the return value is the reply
+// Answers publisher.invoke() on merkaly.<service>-invokes: the return value is the reply, a throw is { status, message, code? }
 export const HandleInvoke = (type: string) => {
   const extras = { [MERKALY_EXTRAS]: { bindings: { [assertMessageType(type)]: null } } };
 
@@ -83,6 +85,8 @@ export const HandleInvoke = (type: string) => {
         `@HandleInvoke on ${target.constructor.name}.${String(key)}: one type per handler`,
       );
     }
+
+    UseFilters(InvokeExceptionFilter)(target, key, descriptor); // errors pass through to the caller
 
     return MessagePattern(type, INVOKES_TRANSPORT, extras)(target, key, descriptor);
   };
