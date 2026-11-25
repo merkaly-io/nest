@@ -219,6 +219,7 @@ El api no decide con `data`: relee el cobro en Asaas (el evento es un disparador
 | `payment.cancelled` | sí | `PaymentRef` | `PAYMENT_DELETED` | api: igual |
 | `payment.refunded` | sí | `PaymentRef & { refundedAmount; partial }` | `PAYMENT_REFUNDED`, `PAYMENT_PARTIALLY_REFUNDED` | api: igual |
 | `payment.refund.in_progress` | sí | `PaymentRef` | `PAYMENT_REFUND_IN_PROGRESS` | api: igual (`REFUNDED` llega después) |
+| `payment.refund.denied` | sí | `PaymentRef` | `PAYMENT_REFUND_DENIED` | api: igual (resync del cobro) |
 | `payment.split.failed` | sí | `PaymentRef & { reason: 'cancelled' \| 'divergence_block' }` | `PAYMENT_SPLIT_CANCELLED`, `PAYMENT_SPLIT_DIVERGENCE_BLOCK` | api: igual |
 | `payment.chargeback.opened` | sí | `PaymentRef & { reason: string \| null }` | `PAYMENT_CHARGEBACK_REQUESTED` | api: igual |
 | `payment.chargeback.updated` | sí | `PaymentRef & { stage: 'disputed' \| 'awaiting_reversal' }` | `PAYMENT_CHARGEBACK_DISPUTE`, `PAYMENT_AWAITING_CHARGEBACK_REVERSAL` | api: igual |
@@ -305,15 +306,11 @@ Nadie lo publica todavía (el api lo hará con `command('signals', 'email.send',
 
 Publicado y sin consumidor:
 
-- `supplier.product.updated`: con `mandatory`, el `emit` de webhooks rechaza con
-  `UnroutableMessageException` (503) y AliExpress reintenta. Antes de migrar webhooks (fase 4) hay
-  que decidir: ligarlo a una cola (`merkaly.api-supplier`, aunque el handler solo haga `ack`) o
-  atrapar `UnroutableMessageException` en ese listener y responder 200.
+- `supplier.product.updated`: ligado en `merkaly.api-supplier` con un handler que solo registra el
+  aviso como pendiente (ENG-16) y hace `ack`, para que AliExpress no reciba 503.
 
 Consumido y sin productor:
 
-- `payment.refund.denied`: el api lo escucha (`sale.payment.listener`), webhooks no lo publica
-  (`PAYMENT_REFUND_DENIED` no se traduce). Decidir si se agrega en webhooks o se quita del api.
 - `email.send`: signals lo consume, nadie lo publica todavía.
 
 Documentado antes y sin código (ni productor ni consumidor), queda como propuesta:
@@ -347,7 +344,6 @@ Webhooks responde 200 al proveedor, descarta con log y no publica (sin `webhook.
 | --- | --- | --- |
 | Asaas | `PAYMENT_CREATED`, `PAYMENT_UPDATED`, `PAYMENT_RESTORED`, `PAYMENT_AUTHORIZED`, `PAYMENT_AWAITING_RISK_ANALYSIS`, `PAYMENT_APPROVED_BY_RISK_ANALYSIS` | Estados intermedios que el api provoca o ya lee. |
 | Asaas | `PAYMENT_BANK_SLIP_*`, `PAYMENT_CHECKOUT_VIEWED`, `PAYMENT_DUNNING_*`, `PAYMENT_ANTICIPATED`, `PAYMENT_RECEIVED_IN_CASH_UNDONE` | Merkaly no los usa (solo Pix y tarjeta 1x). |
-| Asaas | `PAYMENT_REFUND_DENIED` | Sin traducción hoy (ver sección 8). |
 | Auth0 | logins, `slo`, `sv`, `scp`, `sapi`, fallidos y bloqueos | Volumen alto o sin consumidor. |
 | AliExpress | 1 a 12, 20, 41; 0 (`test_push`) | Lado vendedor o prueba; Merkaly es comprador DS (53 y 61). |
 
