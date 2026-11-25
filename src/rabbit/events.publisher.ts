@@ -12,12 +12,14 @@ import {
 import { AmqpConnectionManager, ChannelWrapper, connect } from 'amqp-connection-manager';
 import { MerkalyEvent, MerkalyEventMeta, MerkalyInvoke, createMerkalyEvent } from '../events';
 import { LoggerService, noteRequest } from '../logger';
+import { InvokeError, isInvokeError } from './invoke.filter';
 import { assertMessageType, exchangeName } from './rabbit.names';
 import {
   BrokerStatus,
   DEFAULT_INVOKE_TIMEOUT,
   DEFAULT_PUBLISH_TIMEOUT,
   MerkalyInvokeOptions,
+  MerkalyRoute,
   RABBIT_OPTIONS,
   RabbitModuleOptions,
 } from './rabbit.options';
@@ -27,6 +29,13 @@ export const describeError = (error: any): string =>
   error?.message ??
   error?.err?.message ??
   (typeof error === 'string' ? error : JSON.stringify(error));
+
+// Same status and message as the handler's exception; code stays on getResponse()
+export const fromInvokeError = ({ status, message, code }: InvokeError): HttpException =>
+  new HttpException(
+    { statusCode: status, message, ...(code === undefined ? {} : { code }) },
+    status,
+  );
 
 const GROUP = 'EventsPublisher';
 const REPLY_TO = 'amq.rabbitmq.reply-to'; // direct reply-to, no reply queue
@@ -70,7 +79,7 @@ export class EventsPublisher implements OnApplicationBootstrap, OnApplicationShu
     return this.brokerStatus;
   }
 
-  // Own exchange, where emit() publishes
+  // Own exchange, where emit() publishes; asserted on the first emit, never by a gateway
   public get exchange() {
     return exchangeName(this.options.service);
   }
@@ -98,23 +107,30 @@ export class EventsPublisher implements OnApplicationBootstrap, OnApplicationShu
 
   // Event: a fact of this service, on its own exchange merkaly.<service>
   public emit<T>(type: string, data: T, meta?: MerkalyEventMeta): Promise<MerkalyEvent<T>> {
-    return this.send(this.options.service, type, data, meta);
+    return this.send({ service: this.options.service, type }, data, meta);
+  }
+
+  // Delivered event: an outside fact handed to its owner, on merkaly.<service> (gateway)
+  public deliver<T>(
+    route: MerkalyRoute,
+    data: T,
+    meta?: MerkalyEventMeta,
+  ): Promise<MerkalyEvent<T>> {
+    return this.send(route, data, meta);
   }
 
   // Command: an order for `service` (no reply), on its exchange merkaly.<service>
   public command<T>(
-    service: string,
-    type: string,
+    route: MerkalyRoute,
     data: T,
     meta?: MerkalyEventMeta,
   ): Promise<MerkalyEvent<T>> {
-    return this.send(service, type, data, meta);
+    return this.send(route, data, meta);
   }
 
   // Invoke: request-reply with `service`; resolves with the handler's return value
   public invoke<TReq, TRes>(
-    service: string,
-    type: string,
+    { service, type }: MerkalyRoute,
     data: TReq,
     { timeout: ms = DEFAULT_INVOKE_TIMEOUT, ...meta }: MerkalyInvokeOptions = {},
   ): Promise<TRes> {
@@ -205,21 +221,17 @@ export class EventsPublisher implements OnApplicationBootstrap, OnApplicationShu
     this.channel.on('error', (error: unknown) =>
       this.logger.error({ group: GROUP, message: `Channel setup failed: ${describeError(error)}` }),
     );
-
-    this.exchanges.set(this.exchange, Promise.resolve()); // asserted by setup
   }
 
   // Runs on every (re)connection
   private async setup(channel: ConfirmChannel) {
     channel.on('return', (message: ConsumeMessage) => this.onReturn(message));
 
-    await channel.assertExchange(this.exchange, 'topic', { durable: true });
     await channel.consume(REPLY_TO, (message) => this.onReply(message), { noAck: true });
   }
 
   private send<T>(
-    service: string,
-    type: string,
+    { service, type }: MerkalyRoute,
     data: T,
     meta?: MerkalyEventMeta,
   ): Promise<MerkalyEvent<T>> {
@@ -285,7 +297,7 @@ export class EventsPublisher implements OnApplicationBootstrap, OnApplicationShu
       .finally(() => this.returned.delete(publishId));
   }
 
-  // Commands and invokes go to another service's exchange: assert it once (same topic and durable args)
+  // Lazy: each destination exchange (own included) is asserted on its first publish, then on every reconnect
   private assertExchange(channel: ChannelWrapper, exchange: string, ms: number): Promise<void> {
     const known = this.exchanges.get(exchange);
 
@@ -333,6 +345,8 @@ export class EventsPublisher implements OnApplicationBootstrap, OnApplicationShu
         new ServiceUnavailableException(`${pending.type} failed: unreadable reply`),
       );
     }
+
+    if (isInvokeError(packet.err)) return this.settle(id, fromInvokeError(packet.err));
 
     if (packet.err) {
       return this.settle(

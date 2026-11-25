@@ -1,9 +1,11 @@
+import { UseFilters } from '@nestjs/common';
 import { EventPattern, MessagePattern } from '@nestjs/microservices';
 import {
   PATTERN_EXTRAS_METADATA,
   PATTERN_METADATA,
   TRANSPORT_METADATA,
 } from '@nestjs/microservices/constants';
+import { InvokeExceptionFilter } from './invoke.filter';
 import { assertMessageType, assertServiceName, assertWorkName } from './rabbit.names';
 
 export const MERKALY_EXTRAS = 'merkaly'; // key of the handler extras read by the queue servers
@@ -19,7 +21,7 @@ export const INVOKES_TRANSPORT = Symbol.for('merkaly.invokes');
 
 export interface HandleEventOptions {
   queue: string; // work name of the own queue (payments -> merkaly.<service>-payments)
-  from: string; // service that publishes the event (webhooks -> exchange merkaly.webhooks)
+  from?: string; // another owner's exchange (payments -> merkaly.payments); omitted = own exchange
 }
 
 export interface HandleCommandOptions {
@@ -65,15 +67,15 @@ function bindQueue(decorator: string, types: Types, queue: string, from: string 
   };
 }
 
-// Reacts to a fact published by `from` on its exchange; exact keys, never wildcards
+// Reacts to a fact on merkaly.<from> (own exchange without from), emitted or delivered; exact keys only
 export const HandleEvent = (types: Types, { queue, from }: HandleEventOptions) =>
-  bindQueue('HandleEvent', types, queue, from);
+  bindQueue('HandleEvent', types, queue, from ?? null);
 
 // Runs an order sent to this service with publisher.command(): bound to the own exchange
 export const HandleCommand = (types: Types, { queue }: HandleCommandOptions) =>
   bindQueue('HandleCommand', types, queue, null);
 
-// Answers publisher.invoke() on merkaly.<service>-invokes: the return value is the reply
+// Answers publisher.invoke() on merkaly.<service>-invokes: the return value is the reply, a throw is { status, message, code? }
 export const HandleInvoke = (type: string) => {
   const extras = { [MERKALY_EXTRAS]: { bindings: { [assertMessageType(type)]: null } } };
 
@@ -83,6 +85,8 @@ export const HandleInvoke = (type: string) => {
         `@HandleInvoke on ${target.constructor.name}.${String(key)}: one type per handler`,
       );
     }
+
+    UseFilters(InvokeExceptionFilter)(target, key, descriptor); // errors pass through to the caller
 
     return MessagePattern(type, INVOKES_TRANSPORT, extras)(target, key, descriptor);
   };

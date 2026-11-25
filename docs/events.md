@@ -2,7 +2,9 @@
 
 Estado: **`@merkaly/nest` 0.5.1** (ENG-129 y ENG-132, fases 2 y 5 de la migración a RabbitMQ por servicio). Un
 exchange por servicio, varias colas por servicio con claves exactas, publisher confirms con
-`mandatory` y decoradores `@HandleEvent`, `@HandleCommand` y `@HandleInvoke`. Reemplaza a
+`mandatory` y decoradores `@HandleEvent`, `@HandleCommand` y `@HandleInvoke`. webhooks es un
+gateway sin exchange propio: entrega cada mensaje de proveedor en el exchange de su dueño con
+`deliver` (sección 3). Reemplaza a
 `merkaly.events`, `merkaly.requests`, `@OnMerkalyEvent` y `@OnMerkalyRequest` (0.4.x), sin
 convivencia: no había tráfico real.
 
@@ -40,7 +42,7 @@ Se arman desde strings y se validan al arrancar (`RabbitNameError` con un mensaj
 | Pieza | Regla | Ejemplo |
 | --- | --- | --- |
 | Servicio | `^[a-z][a-z0-9-]*$`, nombre corto del repo | `api`, `webhooks`, `signals` |
-| Exchange | `merkaly.<servicio>`, topic, durable, uno por servicio | `merkaly.webhooks` |
+| Exchange | `merkaly.<servicio>`, topic, durable, uno por dueño de dominio; un gateway no tiene | `merkaly.api`, `merkaly.payments` |
 | Trabajo (cola) | `^[a-z][a-z0-9-]*$`; `invokes` está reservado | `payments`, `identity`, `emails` |
 | Cola | `merkaly.<servicio>-<trabajo>`, más `.retry` y `.dlq` | `merkaly.api-payments`, `merkaly.api-payments.retry`, `merkaly.api-payments.dlq` |
 | Cola de invokes | `merkaly.<servicio>-invokes`, sin `.retry` ni `.dlq` | `merkaly.api-invokes` |
@@ -61,17 +63,38 @@ Sin prefijos de transporte (`command.`, `event.`) ni de servicio: el exchange ya
 
 | Clase | Quién publica | Exchange | API del publisher | Handler | Respuesta | `.retry` / `.dlq` |
 | --- | --- | --- | --- | --- | --- | --- |
-| Evento (algo que pasó) | quien lo vivió | el **propio** | `emit(type, data, meta?)` | `@HandleEvent(type, { queue, from })` | no | sí |
-| Comando (algo que hacer) | quien lo pide | el **del destino** | `command(service, type, data, meta?)` | `@HandleCommand(type, { queue })` | no | sí |
-| Invoke (pedido con respuesta en segundos) | quien pregunta | el **del destino** | `invoke(service, type, data, { timeout, ...meta })` | `@HandleInvoke(type)` | sí, el retorno del handler | no |
+| Evento (algo que pasó) | quien lo vivió | el **propio** | `emit(type, data, meta?)` | `@HandleEvent(type, { queue })` | no | sí |
+| Evento entregado (algo que pasó afuera) | el gateway que lo recibió | el **del dueño** | `deliver({ service, type }, data, meta?)` | `@HandleEvent(type, { queue, from? })` | no | sí |
+| Comando (algo que hacer) | quien lo pide | el **del destino** | `command({ service, type }, data, meta?)` | `@HandleCommand(type, { queue })` | no | sí |
+| Invoke (pedido con respuesta en segundos) | quien pregunta | el **del destino** | `invoke({ service, type }, data, { timeout, ...meta })` | `@HandleInvoke(type)` | sí, el retorno del handler | no |
 
-- `@HandleEvent` liga la cola a `merkaly.<from>` (el exchange de quien publica el evento; `from` es
-  obligatorio, también para eventos propios: `from: 'api'`).
+- `@HandleEvent` sin `from` liga la cola al exchange **propio** `merkaly.<service>` (eventos emitidos
+  por el mismo servicio o entregados a él por un gateway). Con `from` liga al exchange de **otro
+  dueño** (`from: 'payments'`, `from: 'auth'`), lo emita él o lo entregue un gateway.
+- `deliver`, `command` e `invoke` reciben la ruta como objeto (`MerkalyRoute`: `{ service, type }`),
+  después `data` y, opcional, el meta u opciones. `emit` no lleva ruta: siempre el exchange propio.
 - `@HandleCommand` y `@HandleInvoke` ligan al exchange propio.
 - `@HandleEvent` y `@HandleCommand` aceptan un tipo o una lista, y se pueden apilar en el mismo
-  método mientras sea la **misma cola** (por ejemplo, claves de `merkaly.webhooks` y de
+  método mientras sea la **misma cola** (por ejemplo, claves de `merkaly.auth` y de
   `merkaly.api` en `identity`). `@HandleInvoke` es un tipo por handler.
 - Los handlers van en **controllers** (Nest solo descubre patrones ahí).
+
+### Gateway (webhooks)
+
+webhooks.merkaly.io es solo la puerta de entrada de los proveedores externos y **no tiene exchange
+propio** (`merkaly.webhooks` no existe):
+
+| Regla | Detalle |
+| --- | --- |
+| Entrega | Cada mensaje de proveedor, ya normalizado, va con `deliver({ service: dueño, type }, data, meta)` al exchange del dueño del dominio: Asaas a `merkaly.payments`, Auth0 a `merkaly.auth`, AliExpress a `merkaly.api`. |
+| Nada más | Fuera de `deliver`, el gateway solo hace invokes (`invoke`) y responde al proveedor. Nunca llama a `emit`. |
+| Exchange propio perezoso | El publisher declara `merkaly.<service>` en el **primer** `emit`, no al conectar: un servicio que nunca emite nunca lo crea. |
+| `producer` | Sigue siendo el gateway (`webhooks`): dice quién publicó, no de quién es el exchange. |
+| Garantías | Iguales a `emit` y `command`: confirms, `mandatory` y `UnroutableMessageException` si nadie liga la clave en el exchange del dueño. |
+| Consumidor | Otro servicio liga con `from` = el dueño (`@HandleEvent('payment.confirmed', { queue: 'payments', from: 'payments' })`); el dueño liga sin `from`. |
+
+`deliver` y `command` publican igual (exchange del destino); cambia la clase: `deliver` lleva un
+hecho (tipo en pasado), `command` una orden (tipo en presente).
 
 ## 4. Sobre (envelope)
 
@@ -124,7 +147,7 @@ comandos, y `{ pattern, data, id }` para invokes (Nest responde a los paquetes c
 
 | Regla | Detalle |
 | --- | --- |
-| Exchange | Uno por servicio, `merkaly.<servicio>`, topic, durable. Lo declara el publisher del dueño, cada consumidor que liga claves de él y el publisher que le manda un comando o invoke (mismos argumentos, la declaración es idempotente). |
+| Exchange | Uno por dueño de dominio, `merkaly.<servicio>`, topic, durable. Lo declaran el publisher del dueño en su primer `emit` (no al conectar), cada consumidor que liga claves de él y el publisher que le entrega un evento, un comando o un invoke (mismos argumentos, la declaración es idempotente y se repite en cada reconexión). |
 | Colas | Varias por servicio, una por trabajo. Cada cola tiene un solo dueño; las réplicas del servicio se reparten sus mensajes. La declara el dueño con `rabbitQueue()` (o `rabbitInvokes()`) en su `main.ts`. |
 | Bindings | Una clave **exacta** por tipo con handler, nunca `#` ni `*`. Una cola puede ligar claves de varios exchanges. |
 | Transporte | Cada cola tiene su transport id (`Symbol.for('merkaly.queue:<trabajo>')`, invokes `Symbol.for('merkaly.invokes')`): los handlers de una cola nunca se ligan a otra. |
@@ -132,7 +155,7 @@ comandos, y `{ pattern, data, id }` para invokes (Nest responde a los paquetes c
 | Patrón | El `pattern` del cuerpo tiene que ser la routing key cuando el mensaje llega por un exchange; si no, va a la `.dlq` con una línea `ERROR [DLQ]`. Lo que vuelve de `.retry` llega por el exchange por defecto y no se valida. |
 | Sin consumidor | Todo publish va con `mandatory`: si ninguna cola liga la clave, el broker devuelve el mensaje y la promesa rechaza con `UnroutableMessageException` (503). El productor no pierde mensajes en silencio; webhooks responde 5xx y el proveedor reintenta. Corolario: **la cola del consumidor tiene que existir antes** de que el productor publique (desplegar primero al consumidor). Por eso no hay alternate exchange (ENG-89): con claves exactas y `mandatory`, lo que no tiene destino ya falla en el productor, y un alternate exchange lo convertiría en un éxito para el productor con el mensaje guardado aparte. |
 | Sin handler | Un mensaje que llega a una cola sin handler para su clave (binding viejo, tipo renombrado) no se confirma: `nack` sin requeue, va a la `.dlq` con una línea `ERROR [DLQ] ... has no handler` (ENG-115). |
-| Confirmación | Publisher confirms: `emit` y `command` resuelven cuando el broker tomó y enrutó el mensaje. Timeout 5 s (`timeout` del módulo). |
+| Confirmación | Publisher confirms: `emit`, `deliver` y `command` resuelven cuando el broker tomó y enrutó el mensaje. Timeout 5 s (`timeout` del módulo). |
 | Broker caído | Falla en el momento (`ServiceUnavailableException`, "not connected"), sin buffer silencioso (ENG-87). Con la conexión arriba pero el canal ocupado o reconectando, el mensaje espera como máximo el timeout y se descarta del buffer. Un timeout no garantiza que el broker no lo haya recibido: el reintento del productor puede duplicar, y por eso el consumidor deduplica (inbox). |
 | Cola sin consumir | Argumentos de la cola principal (congelados desde 0.4): `x-message-ttl` 7 días, `x-max-length` 10.000, `x-overflow: drop-head`, dead letter a la `.dlq`. En producción la operator policy `merkaly-work` pasa el overflow a `reject-publish-dlx` (ver "Límites y políticas del broker"). |
 | Bindings viejos | El paquete liga, no desliga: si se quita un handler, la clave queda ligada en el broker y sus mensajes van a la `.dlq` (sin handler). Desligar a mano (management UI o `rabbitmqadmin`). |
@@ -210,11 +233,11 @@ Verificar: `rabbitmqctl list_queues name policy operator_policy effective_policy
 
 | Regla | Detalle |
 | --- | --- |
-| Exchange | El del servicio que responde (`invoke('api', ...)` publica en `merkaly.api`). |
+| Exchange | El del servicio que responde (`invoke({ service: 'api', type }, ...)` publica en `merkaly.api`). |
 | Cola | `merkaly.<servicio>-invokes`, durable, `noAck`, sin `.retry` ni `.dlq`, `x-message-ttl` 30 s, `x-max-length` 1.000 con `drop-head`. La declara quien responde con `rabbitInvokes()`. |
 | Respuesta | Direct reply-to (`amq.rabbitmq.reply-to`) con `correlationId`, en el mismo canal del publisher. |
 | Mensaje | `expiration` = timeout, no persistente; el sobre lleva `expiresAt`. Vencido: el broker lo descarta y, si igual llega, el servidor lo descarta sin correr el handler (`WARN expired, dropped`). |
-| Errores | Sin respuesta en el plazo: `GatewayTimeoutException`. Handler con error, broker sin configurar o caído: `ServiceUnavailableException`. Nadie ligó el tipo: `UnroutableMessageException` en el momento (sin esperar el timeout). Quien pregunta decide el fallback (webhooks responde `REFUSED`). |
+| Errores | El handler lanza su `HttpException` como en HTTP; `@HandleInvoke` le pone `InvokeExceptionFilter` y la respuesta lleva `err: { status, message, code? }` (`code` sale del cuerpo de la excepción, si lo tiene). Quien pregunta rechaza con una `HttpException` del mismo status y mensaje, con `code` en `getResponse()` (`{ statusCode, message, code? }`). Un error que no es `HttpException` viaja como 500 `Internal server error` y su mensaje y stack quedan en el log de quien responde. Sin respuesta en el plazo: `GatewayTimeoutException`. Broker sin configurar o caído, o respuesta ilegible: `ServiceUnavailableException`. Nadie ligó el tipo: `UnroutableMessageException` en el momento (sin esperar el timeout). Quien pregunta decide el fallback (webhooks responde `REFUSED`). |
 | Contexto | El handler corre fuera del contexto del app (sin CLS, guards ni interceptors globales); abre el suyo si lo necesita. |
 
 ### Idempotencia y orden
@@ -233,12 +256,12 @@ Verificar: `rabbitmqctl list_queues name policy operator_policy effective_policy
 
 | Mensaje | Clase | Publica | Exchange | Cola dueña |
 | --- | --- | --- | --- | --- |
-| `payment.confirmed`, `.received`, `.failed`, `.overdue`, `.cancelled`, `.refunded`, `.refund.in_progress`, `.split.failed`, `.chargeback.opened`, `.chargeback.updated` | evento | webhooks | `merkaly.webhooks` | `merkaly.api-payments` |
-| `payment.account.approved`, `.rejected`, `.status_changed` | evento | webhooks | `merkaly.webhooks` | `merkaly.api-payments` |
-| `payment.transfer.created`, `.pending`, `.in_bank_processing`, `.blocked`, `.done`, `.failed`, `.cancelled` | evento | webhooks | `merkaly.webhooks` | `merkaly.api-payments` |
-| `supplier.order.status_changed` | evento | webhooks | `merkaly.webhooks` | `merkaly.api-supplier` |
-| `supplier.product.updated` | evento | webhooks | `merkaly.webhooks` | **ninguna** (ver sección 8) |
-| `identity.signup.requested`, `identity.organization.member.added`, `.removed`, `.role.assigned`, `.role.removed`, `identity.organization.created`, `.updated`, `.deleted` | evento | webhooks | `merkaly.webhooks` | `merkaly.api-identity` |
+| `payment.confirmed`, `.received`, `.failed`, `.overdue`, `.cancelled`, `.refunded`, `.refund.in_progress`, `.split.failed`, `.chargeback.opened`, `.chargeback.updated` | evento entregado | webhooks | `merkaly.payments` | `merkaly.api-payments` |
+| `payment.account.approved`, `.rejected`, `.status_changed` | evento entregado | webhooks | `merkaly.payments` | `merkaly.api-payments` |
+| `payment.transfer.created`, `.pending`, `.in_bank_processing`, `.blocked`, `.done`, `.failed`, `.cancelled` | evento entregado | webhooks | `merkaly.payments` | `merkaly.api-payments` |
+| `supplier.order.status_changed` | evento entregado | webhooks | `merkaly.api` | `merkaly.api-supplier` |
+| `supplier.product.updated` | evento entregado | webhooks | `merkaly.api` | **ninguna** (ver sección 8) |
+| `identity.signup.requested`, `identity.organization.member.added`, `.removed`, `.role.assigned`, `.role.removed`, `identity.organization.created`, `.updated`, `.deleted` | evento entregado | webhooks | `merkaly.auth` | `merkaly.api-identity` |
 | `account.user.linked` | evento | api | `merkaly.api` | `merkaly.api-identity` |
 | `payment.withdrawal.authorize`, `payment.refund.authorize` | invoke | webhooks | `merkaly.api` | `merkaly.api-invokes` |
 | `email.send` | comando | nadie hoy | `merkaly.signals` | `merkaly.signals-emails` |
@@ -355,7 +378,7 @@ por envío para que un reenvío no mande dos emails.
 | --- | --- | --- | --- | --- |
 | `email.send` | según el envío | `{ to: string \| string[]; cc?: string \| string[]; subject; text }` | `merkaly.signals-emails` | signals: envía; error transitorio `.retry`, dato inválido o rechazo permanente `ack` con log; dedup en memoria por `id` |
 
-Nadie lo publica todavía (el api lo hará con `command('signals', 'email.send', ...)`). A futuro
+Nadie lo publica todavía (el api lo hará con `command({ service: 'signals', type: 'email.send' }, ...)`). A futuro
 `sms.send` y `whatsapp.send` en `merkaly.signals-sms` y `merkaly.signals-whatsapp`.
 
 ### Invokes que responde el api
@@ -394,8 +417,8 @@ Con claves exactas nada de esto se liga hasta que tenga handler.
 `payment.*` traducidos con `producer: payments.merkaly.io`. En master de webhooks **nadie publica**
 `payment.provider.notified` y webhooks sigue traduciendo Asaas, así que hoy payments no recibe nada.
 
-Cuando entre: exchange `merkaly.payments`, sus eventos `payment.*` saldrían de ahí (los
-consumidores cambian `from: 'webhooks'` por `from: 'payments'`), y sus invokes sin el servicio en el
+Cuando entre: exchange `merkaly.payments`, donde webhooks ya entrega los `payment.*` de Asaas (los
+consumidores ligan con `from: 'payments'`), y sus invokes sin el servicio en el
 nombre (`payment.charge.create` en vez de `payments.charge.create`). Contrato del servicio: repo
 payments, `docs/contract.md`.
 
@@ -440,4 +463,5 @@ conoce manda el mensaje a la `.dlq`.
 | 0.3.0 | Sin `MerkalyEventType` ni `EventDataMap`: `type` string y `data` genérico. |
 | 0.3.1 | Request-reply en `merkaly.requests`. |
 | 0.5.1 | Inbox opcional (`inbox: { has, add }`), hook `onDeadLetter` y línea `[DLQ]` en cada descarte, mensajes sin handler o con patrón distinto a la `.dlq` con error. Límites por operator policy (`reject-publish-dlx`, TTL de 14 días en la `.dlq`). |
+| Siguiente | Gateway: `deliver({ service, type }, data, meta?)` entrega un evento en el exchange del dueño; el exchange propio se declara en el primer `emit`, no al conectar. **Incompatible**: `command` e `invoke` reciben la ruta como objeto (`MerkalyRoute`). `from` opcional en `@HandleEvent` (sin él, exchange propio). Errores de invoke con el mismo status y mensaje en quien pregunta (`{ status, message, code? }` en la respuesta). |
 | 0.5.0 | Exchange y colas por servicio, claves exactas, `mandatory`, confirmación antes del ack al reintentar, `@HandleEvent` / `@HandleCommand` / `@HandleInvoke`, `emit` / `command` / `invoke`. Sin `MerkalyProducer` (`producer` es el nombre corto), `MerkalyRequest` pasa a `MerkalyInvoke`, `AliexpressOrderStatus` es solo un tipo. |
