@@ -58,7 +58,7 @@ import {
     LoggerModule.forRoot({ service: 'webhooks.merkaly.io' }), // global
     RabbitModule.forRoot({
       url: env.string('RABBITMQ_URL'), // sem url: emit rejeita com 503
-      service: 'webhooks', // exchange merkaly.webhooks e producer de toda mensagem
+      service: 'webhooks', // producer de toda mensagem; exchange merkaly.webhooks só no primeiro emit
       timeout: env.number('RABBITMQ_PUBLISH_TIMEOUT', 5000),
       required: env.isProduction, // produção não sobe sem url
     }),
@@ -70,7 +70,7 @@ export class AppModule {}
 
 `RabbitModule.forRootAsync({ imports, inject, useFactory })` aceita a config injetada. O `service` é validado no boot (`^[a-z][a-z0-9-]*$`).
 
-**Exchange e filas**: cada serviço tem o seu exchange topic `merkaly.<serviço>` e publica nele os seus eventos; comandos e invokes vão para o exchange do destino. Cada serviço declara as suas filas, uma por trabalho (`merkaly.api-payments`, `merkaly.signals-emails`), ligadas com chaves exatas (nunca `#`) a um ou mais exchanges. Um consumidor novo não toca no produtor, mas precisa existir antes: toda publicação usa `mandatory` e falha se nenhuma fila liga a chave. Modelo completo em [`docs/events.md`](docs/events.md).
+**Exchange e filas**: cada dono de domínio tem o seu exchange topic `merkaly.<serviço>` e publica nele os seus eventos (declarado no primeiro `emit`, nunca ao conectar); eventos entregues, comandos e invokes vão para o exchange do destino. Um gateway (webhooks) não tem exchange próprio: entrega cada mensagem de provedor no exchange do dono com `deliver`. Cada serviço declara as suas filas, uma por trabalho (`merkaly.api-payments`, `merkaly.signals-emails`), ligadas com chaves exatas (nunca `#`) a um ou mais exchanges. Um consumidor novo não toca no produtor, mas precisa existir antes: toda publicação usa `mandatory` e falha se nenhuma fila liga a chave. Modelo completo em [`docs/events.md`](docs/events.md).
 
 **Health check**: o pacote não registra controllers. O Swagger servido em `/` responde 200 e funciona como health check.
 
@@ -131,13 +131,17 @@ Contrato completo e catálogo em [`docs/events.md`](docs/events.md). Mensagens d
 | Classe | Publica | Exchange | Handler | Resposta |
 | --- | --- | --- | --- | --- |
 | Evento | `emit(type, data, meta?)` | o próprio | `@HandleEvent(type, { queue, from })` | não |
+| Evento entregue (gateway) | `deliver(service, type, data, meta?)` | o do dono | `@HandleEvent(type, { queue, from })` | não |
 | Comando | `command(service, type, data, meta?)` | o do destino | `@HandleCommand(type, { queue })` | não |
 | Invoke | `invoke(service, type, data, { timeout, ...meta })` | o do destino | `@HandleInvoke(type)` | sim |
 
 ```ts
 // produtor: resolve com o evento quando o broker confirmou e roteou; senão ServiceUnavailableException
 // (UnroutableMessageException se nenhuma fila liga o tipo). O provedor recebe 503 e reenvia.
-await this.events.emit('payment.received', { ...paymentRef, receivedAt }, {
+await this.events.emit('account.user.linked', { from, to });
+
+// gateway: o fato do provedor vai para o exchange do dono (merkaly.payments), não para um próprio
+await this.events.deliver('payments', 'payment.received', { ...paymentRef, receivedAt }, {
   id: `asaas:${body.id}`, source: 'asaas', organization, occurredAt, raw: { type: body.event, payload },
 });
 
@@ -165,12 +169,12 @@ RabbitModule.forConsumerAsync({
 });
 
 // handler (controller): chaves exatas; várias chaves e decoradores empilhados na mesma fila
-@HandleEvent(['payment.confirmed', 'payment.received'], { queue: 'payments', from: 'webhooks' })
+@HandleEvent(['payment.confirmed', 'payment.received'], { queue: 'payments', from: 'payments' })
 payment(@Payload() event: MerkalyEvent<PaymentRef>, @Ctx() context: RmqContext) {
   return this.consumer.handle(event, context, (e) => this.payments.refresh(e.data.paymentId));
 }
 
-@HandleEvent('identity.signup.requested', { queue: 'identity', from: 'webhooks' })
+@HandleEvent('identity.signup.requested', { queue: 'identity', from: 'auth' }) // entregue por webhooks
 @HandleEvent('account.user.linked', { queue: 'identity', from: 'api' }) // dois exchanges, uma fila
 identity(@Payload() event: MerkalyEvent, @Ctx() context: RmqContext) { ... }
 ```
