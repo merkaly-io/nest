@@ -12,6 +12,7 @@ import {
 import { AmqpConnectionManager, ChannelWrapper, connect } from 'amqp-connection-manager';
 import { MerkalyEvent, MerkalyEventMeta, MerkalyInvoke, createMerkalyEvent } from '../events';
 import { LoggerService, noteRequest } from '../logger';
+import { InvokeError, isInvokeError } from './invoke.filter';
 import { assertMessageType, exchangeName } from './rabbit.names';
 import {
   BrokerStatus,
@@ -28,6 +29,13 @@ export const describeError = (error: any): string =>
   error?.message ??
   error?.err?.message ??
   (typeof error === 'string' ? error : JSON.stringify(error));
+
+// Same status and message as the handler's exception; code stays on getResponse()
+export const fromInvokeError = ({ status, message, code }: InvokeError): HttpException =>
+  new HttpException(
+    { statusCode: status, message, ...(code === undefined ? {} : { code }) },
+    status,
+  );
 
 const GROUP = 'EventsPublisher';
 const REPLY_TO = 'amq.rabbitmq.reply-to'; // direct reply-to, no reply queue
@@ -337,6 +345,8 @@ export class EventsPublisher implements OnApplicationBootstrap, OnApplicationShu
         new ServiceUnavailableException(`${pending.type} failed: unreadable reply`),
       );
     }
+
+    if (isInvokeError(packet.err)) return this.settle(id, fromInvokeError(packet.err));
 
     if (packet.err) {
       return this.settle(

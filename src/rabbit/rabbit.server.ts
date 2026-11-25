@@ -9,6 +9,7 @@ import { MerkalyInvoke } from '../events';
 import { LoggerService, requestContext } from '../logger';
 import { DEAD_LETTER_GROUP } from './events.consumer';
 import { describeError } from './events.publisher';
+import { isInvokeError } from './invoke.filter';
 import {
   INVOKES_TRANSPORT,
   MERKALY_EXTRAS,
@@ -294,9 +295,12 @@ export class MerkalyInvokesServer extends MerkalyServer {
   ) {
     const started = this.started.get(context.getMessage());
     const failed = (message as { err?: unknown })?.err;
+    const outcome = isInvokeError(failed)
+      ? `failed ${failed.status} "${failed.message}"`
+      : 'failed';
 
     if (started) {
-      const text = `${started.line} ${failed ? 'failed' : 'ok'} ${Date.now() - started.at}ms`;
+      const text = `${started.line} ${failed ? outcome : 'ok'} ${Date.now() - started.at}ms`;
 
       if (failed) this.log.error({ group: GROUP, message: text });
       else this.log.log({ group: GROUP, message: text });
