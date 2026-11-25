@@ -63,14 +63,16 @@ Sin prefijos de transporte (`command.`, `event.`) ni de servicio: el exchange ya
 
 | Clase | Quién publica | Exchange | API del publisher | Handler | Respuesta | `.retry` / `.dlq` |
 | --- | --- | --- | --- | --- | --- | --- |
-| Evento (algo que pasó) | quien lo vivió | el **propio** | `emit(type, data, meta?)` | `@HandleEvent(type, { queue, from })` | no | sí |
-| Evento entregado (algo que pasó afuera) | el gateway que lo recibió | el **del dueño** | `deliver(service, type, data, meta?)` | `@HandleEvent(type, { queue, from })` | no | sí |
-| Comando (algo que hacer) | quien lo pide | el **del destino** | `command(service, type, data, meta?)` | `@HandleCommand(type, { queue })` | no | sí |
-| Invoke (pedido con respuesta en segundos) | quien pregunta | el **del destino** | `invoke(service, type, data, { timeout, ...meta })` | `@HandleInvoke(type)` | sí, el retorno del handler | no |
+| Evento (algo que pasó) | quien lo vivió | el **propio** | `emit(type, data, meta?)` | `@HandleEvent(type, { queue })` | no | sí |
+| Evento entregado (algo que pasó afuera) | el gateway que lo recibió | el **del dueño** | `deliver({ service, type }, data, meta?)` | `@HandleEvent(type, { queue, from? })` | no | sí |
+| Comando (algo que hacer) | quien lo pide | el **del destino** | `command({ service, type }, data, meta?)` | `@HandleCommand(type, { queue })` | no | sí |
+| Invoke (pedido con respuesta en segundos) | quien pregunta | el **del destino** | `invoke({ service, type }, data, { timeout, ...meta })` | `@HandleInvoke(type)` | sí, el retorno del handler | no |
 
-- `@HandleEvent` liga la cola a `merkaly.<from>`: `from` es el **dueño del exchange** donde cae el
-  evento, lo emita él o lo entregue un gateway (`from: 'payments'`, `from: 'auth'`). Es obligatorio,
-  también para eventos propios (`from: 'api'`).
+- `@HandleEvent` sin `from` liga la cola al exchange **propio** `merkaly.<service>` (eventos emitidos
+  por el mismo servicio o entregados a él por un gateway). Con `from` liga al exchange de **otro
+  dueño** (`from: 'payments'`, `from: 'auth'`), lo emita él o lo entregue un gateway.
+- `deliver`, `command` e `invoke` reciben la ruta como objeto (`MerkalyRoute`: `{ service, type }`),
+  después `data` y, opcional, el meta u opciones. `emit` no lleva ruta: siempre el exchange propio.
 - `@HandleCommand` y `@HandleInvoke` ligan al exchange propio.
 - `@HandleEvent` y `@HandleCommand` aceptan un tipo o una lista, y se pueden apilar en el mismo
   método mientras sea la **misma cola** (por ejemplo, claves de `merkaly.auth` y de
@@ -84,12 +86,12 @@ propio** (`merkaly.webhooks` no existe):
 
 | Regla | Detalle |
 | --- | --- |
-| Entrega | Cada mensaje de proveedor, ya normalizado, va con `deliver(dueño, type, data, meta)` al exchange del dueño del dominio: Asaas a `merkaly.payments`, Auth0 a `merkaly.auth`, AliExpress a `merkaly.api`. |
+| Entrega | Cada mensaje de proveedor, ya normalizado, va con `deliver({ service: dueño, type }, data, meta)` al exchange del dueño del dominio: Asaas a `merkaly.payments`, Auth0 a `merkaly.auth`, AliExpress a `merkaly.api`. |
 | Nada más | Fuera de `deliver`, el gateway solo hace invokes (`invoke`) y responde al proveedor. Nunca llama a `emit`. |
 | Exchange propio perezoso | El publisher declara `merkaly.<service>` en el **primer** `emit`, no al conectar: un servicio que nunca emite nunca lo crea. |
 | `producer` | Sigue siendo el gateway (`webhooks`): dice quién publicó, no de quién es el exchange. |
 | Garantías | Iguales a `emit` y `command`: confirms, `mandatory` y `UnroutableMessageException` si nadie liga la clave en el exchange del dueño. |
-| Consumidor | Liga con `from` = el dueño (`@HandleEvent('payment.confirmed', { queue: 'payments', from: 'payments' })`). |
+| Consumidor | Otro servicio liga con `from` = el dueño (`@HandleEvent('payment.confirmed', { queue: 'payments', from: 'payments' })`); el dueño liga sin `from`. |
 
 `deliver` y `command` publican igual (exchange del destino); cambia la clase: `deliver` lleva un
 hecho (tipo en pasado), `command` una orden (tipo en presente).
@@ -231,7 +233,7 @@ Verificar: `rabbitmqctl list_queues name policy operator_policy effective_policy
 
 | Regla | Detalle |
 | --- | --- |
-| Exchange | El del servicio que responde (`invoke('api', ...)` publica en `merkaly.api`). |
+| Exchange | El del servicio que responde (`invoke({ service: 'api', type }, ...)` publica en `merkaly.api`). |
 | Cola | `merkaly.<servicio>-invokes`, durable, `noAck`, sin `.retry` ni `.dlq`, `x-message-ttl` 30 s, `x-max-length` 1.000 con `drop-head`. La declara quien responde con `rabbitInvokes()`. |
 | Respuesta | Direct reply-to (`amq.rabbitmq.reply-to`) con `correlationId`, en el mismo canal del publisher. |
 | Mensaje | `expiration` = timeout, no persistente; el sobre lleva `expiresAt`. Vencido: el broker lo descarta y, si igual llega, el servidor lo descarta sin correr el handler (`WARN expired, dropped`). |
@@ -376,7 +378,7 @@ por envío para que un reenvío no mande dos emails.
 | --- | --- | --- | --- | --- |
 | `email.send` | según el envío | `{ to: string \| string[]; cc?: string \| string[]; subject; text }` | `merkaly.signals-emails` | signals: envía; error transitorio `.retry`, dato inválido o rechazo permanente `ack` con log; dedup en memoria por `id` |
 
-Nadie lo publica todavía (el api lo hará con `command('signals', 'email.send', ...)`). A futuro
+Nadie lo publica todavía (el api lo hará con `command({ service: 'signals', type: 'email.send' }, ...)`). A futuro
 `sms.send` y `whatsapp.send` en `merkaly.signals-sms` y `merkaly.signals-whatsapp`.
 
 ### Invokes que responde el api
@@ -461,5 +463,5 @@ conoce manda el mensaje a la `.dlq`.
 | 0.3.0 | Sin `MerkalyEventType` ni `EventDataMap`: `type` string y `data` genérico. |
 | 0.3.1 | Request-reply en `merkaly.requests`. |
 | 0.5.1 | Inbox opcional (`inbox: { has, add }`), hook `onDeadLetter` y línea `[DLQ]` en cada descarte, mensajes sin handler o con patrón distinto a la `.dlq` con error. Límites por operator policy (`reject-publish-dlx`, TTL de 14 días en la `.dlq`). |
-| Siguiente | Gateway: `deliver(service, type, data, meta?)` entrega un evento en el exchange del dueño; el exchange propio se declara en el primer `emit`, no al conectar. |
+| Siguiente | Gateway: `deliver({ service, type }, data, meta?)` entrega un evento en el exchange del dueño; el exchange propio se declara en el primer `emit`, no al conectar. **Incompatible**: `command` e `invoke` reciben la ruta como objeto (`MerkalyRoute`). `from` opcional en `@HandleEvent` (sin él, exchange propio). |
 | 0.5.0 | Exchange y colas por servicio, claves exactas, `mandatory`, confirmación antes del ack al reintentar, `@HandleEvent` / `@HandleCommand` / `@HandleInvoke`, `emit` / `command` / `invoke`. Sin `MerkalyProducer` (`producer` es el nombre corto), `MerkalyRequest` pasa a `MerkalyInvoke`, `AliexpressOrderStatus` es solo un tipo. |

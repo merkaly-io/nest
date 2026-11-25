@@ -42,7 +42,7 @@ import {
   requestLogger, requestOrigin, requestContext, noteRequest, bodyParsers, bodyParserReason, // uma linha por request
   noIndex, // X-Robots-Tag noindex + /robots.txt bloqueando buscadores
   AbstractExceptionFilter, ExceptionsFilter, rememberError, // filtros (motivo do erro para o log)
-  RabbitModule, EventsPublisher, EventsConsumer, EventRejectedException, UnroutableMessageException, // mensagens
+  RabbitModule, EventsPublisher, EventsConsumer, EventRejectedException, UnroutableMessageException, MerkalyRoute, // mensagens
   rabbitQueue, rabbitInvokes, HandleEvent, HandleCommand, HandleInvoke, // consumidores
   exchangeName, queueName, invokesQueueName, RabbitNameError, // nomes por convenção
   MerkalyEvent, MerkalyInvoke, createMerkalyEvent, AliexpressOrderStatus, PaymentRef, // sobre e tipos de data
@@ -130,10 +130,10 @@ Contrato completo e catálogo em [`docs/events.md`](docs/events.md). Mensagens d
 
 | Classe | Publica | Exchange | Handler | Resposta |
 | --- | --- | --- | --- | --- |
-| Evento | `emit(type, data, meta?)` | o próprio | `@HandleEvent(type, { queue, from })` | não |
-| Evento entregue (gateway) | `deliver(service, type, data, meta?)` | o do dono | `@HandleEvent(type, { queue, from })` | não |
-| Comando | `command(service, type, data, meta?)` | o do destino | `@HandleCommand(type, { queue })` | não |
-| Invoke | `invoke(service, type, data, { timeout, ...meta })` | o do destino | `@HandleInvoke(type)` | sim |
+| Evento | `emit(type, data, meta?)` | o próprio | `@HandleEvent(type, { queue })` | não |
+| Evento entregue (gateway) | `deliver({ service, type }, data, meta?)` | o do dono | `@HandleEvent(type, { queue, from? })` | não |
+| Comando | `command({ service, type }, data, meta?)` | o do destino | `@HandleCommand(type, { queue })` | não |
+| Invoke | `invoke({ service, type }, data, { timeout, ...meta })` | o do destino | `@HandleInvoke(type)` | sim |
 
 ```ts
 // produtor: resolve com o evento quando o broker confirmou e roteou; senão ServiceUnavailableException
@@ -141,11 +141,11 @@ Contrato completo e catálogo em [`docs/events.md`](docs/events.md). Mensagens d
 await this.events.emit('account.user.linked', { from, to });
 
 // gateway: o fato do provedor vai para o exchange do dono (merkaly.payments), não para um próprio
-await this.events.deliver('payments', 'payment.received', { ...paymentRef, receivedAt }, {
+await this.events.deliver({ service: 'payments', type: 'payment.received' }, { ...paymentRef, receivedAt }, {
   id: `asaas:${body.id}`, source: 'asaas', organization, occurredAt, raw: { type: body.event, payload },
 });
 
-await this.events.command('signals', 'email.send', { to, subject, text }, { id: notification.id });
+await this.events.command({ service: 'signals', type: 'email.send' }, { to, subject, text }, { id: notification.id });
 ```
 
 Consumidor:
@@ -175,7 +175,7 @@ payment(@Payload() event: MerkalyEvent<PaymentRef>, @Ctx() context: RmqContext) 
 }
 
 @HandleEvent('identity.signup.requested', { queue: 'identity', from: 'auth' }) // entregue por webhooks
-@HandleEvent('account.user.linked', { queue: 'identity', from: 'api' }) // dois exchanges, uma fila
+@HandleEvent('account.user.linked', { queue: 'identity' }) // sem from: exchange próprio; dois exchanges, uma fila
 identity(@Payload() event: MerkalyEvent, @Ctx() context: RmqContext) { ... }
 ```
 
@@ -200,7 +200,7 @@ Para quem precisa de uma resposta na hora (ex. webhooks responde ao Asaas se um 
 // quem pergunta: resolve com o retorno do handler; GatewayTimeoutException sem resposta no prazo,
 // ServiceUnavailableException se o handler falhou ou o broker não está disponível,
 // UnroutableMessageException se ninguém liga o tipo
-const answer = await this.events.invoke<Req, Res>('api', 'payment.withdrawal.authorize', data, { timeout: 3000 });
+const answer = await this.events.invoke<Req, Res>({ service: 'api', type: 'payment.withdrawal.authorize' }, data, { timeout: 3000 });
 
 // handler (controller) de quem responde: o retorno é a resposta
 @HandleInvoke('payment.withdrawal.authorize')
