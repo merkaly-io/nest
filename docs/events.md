@@ -376,9 +376,9 @@ por envío para que un reenvío no mande dos emails.
 
 | Tipo | Org | `data` | Cola | Consumidor |
 | --- | --- | --- | --- | --- |
-| `email.send` | según el envío | `{ sender: 'admin' \| 'store'; fromName?: string; to: string \| string[]; cc?: string \| string[]; subject; text }` | `merkaly.signals-emails` | signals: envía; error transitorio `.retry`, dato inválido o rechazo permanente `ack` con log; dedup en memoria por `id` |
+| `email.send` | según el envío | `{ sender: 'admin' \| 'store' \| 'auth'; fromName?: string; to: string \| string[]; cc?: string \| string[]; subject; text }` | `merkaly.signals-emails` | signals: envía; error transitorio `.retry`, dato inválido o rechazo permanente `ack` con log; dedup en memoria por `id` |
 
-`sender` elige el remitente, fijo en signals (`MAIL_SENDERS`): `admin` sale de `notification@admin.merkaly.io` (Merkaly al comerciante) y `store` de `notification@store.merkaly.io` (la tienda al comprador), un dominio de envío por superficie para separar la reputación. El productor nunca manda la dirección. `fromName` es el nombre visible (el de la tienda para `store`), `Merkaly` si falta. Un `sender` desconocido es dato inválido (`ack` con log).
+`sender` elige el remitente, fijo en signals (`MAIL_SENDERS`): `admin` sale de `notification@admin.merkaly.io` (Merkaly al comerciante) `store` de `notification@store.merkaly.io` (la tienda al comprador) y `auth` de `notification@auth.merkaly.io` (emails de cuenta de Auth0), un dominio de envío por superficie para separar la reputación. El productor nunca manda la dirección. `subject` y `text` llegan ya armados (variables resueltas por el productor); signals no tiene plantillas por tipo, solo envuelve el texto en un layout base. `fromName` es el nombre visible (el de la tienda para `store`), `Merkaly` si falta. Un `sender` desconocido es dato inválido (`ack` con log).
 
 Nadie lo publica todavía (el api lo hará con `command({ service: 'signals', type: 'email.send' }, ...)`). A futuro
 `sms.send` y `whatsapp.send` en `merkaly.signals-sms` y `merkaly.signals-whatsapp`.
