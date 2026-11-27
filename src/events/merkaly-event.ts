@@ -81,7 +81,7 @@ export interface MerkalyEvent<T = unknown> {
   occurredAt: string; // ISO, when it happened at the provider
   publishedAt: string; // ISO
   correlationId?: string;
-  data: T; // shape agreed per type, see docs/events.md
+  data: T; // shape agreed per type, see https://docs.merkaly.io/tecnico/nest/events
   raw?: MerkalyRawEvent;
 }
 

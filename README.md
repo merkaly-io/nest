@@ -5,7 +5,11 @@ Pacote compartilhado dos backends NestJS da Merkaly (api, webhooks, signals, pay
 1. **Fonte única de versões**: fixa `@nestjs/*` (versão exata, todos os serviços rodam a mesma), rxjs, amqplib, class-validator, dotenv e também o tooling de desenvolvimento (ESLint, Prettier, TypeScript, typescript-eslint, Nest CLI, ts-node, `@types/node`).
 2. **Infraestrutura comum**: RabbitMQ (publisher + consumidor), contrato de eventos de webhook, logger, filtro de exceções, env e assinaturas.
 
-Proposta e motivação: [docs/proposal.md](docs/proposal.md).
+Proposta e motivação: [proposta](https://docs.merkaly.io/tecnico/nest/proposal).
+
+## Documentación
+
+La documentación técnica (arquitectura, convenciones, setup, runbooks y contratos) vive en [docs.merkaly.io/tecnico/nest](https://docs.merkaly.io/tecnico/nest). Aquí solo quedan los README de carpeta, junto al código.
 
 ## Regra de versões
 
@@ -70,7 +74,7 @@ export class AppModule {}
 
 `RabbitModule.forRootAsync({ imports, inject, useFactory })` aceita a config injetada. O `service` é validado no boot (`^[a-z][a-z0-9-]*$`).
 
-**Exchange e filas**: cada dono de domínio tem o seu exchange topic `merkaly.<serviço>` e publica nele os seus eventos (declarado no primeiro `emit`, nunca ao conectar); eventos entregues, comandos e invokes vão para o exchange do destino. Um gateway (webhooks) não tem exchange próprio: entrega cada mensagem de provedor no exchange do dono com `deliver`. Cada serviço declara as suas filas, uma por trabalho (`merkaly.api-payments`, `merkaly.signals-emails`), ligadas com chaves exatas (nunca `#`) a um ou mais exchanges. Um consumidor novo não toca no produtor, mas precisa existir antes: toda publicação usa `mandatory` e falha se nenhuma fila liga a chave. Modelo completo em [`docs/events.md`](docs/events.md).
+**Exchange e filas**: cada dono de domínio tem o seu exchange topic `merkaly.<serviço>` e publica nele os seus eventos (declarado no primeiro `emit`, nunca ao conectar); eventos entregues, comandos e invokes vão para o exchange do destino. Um gateway (webhooks) não tem exchange próprio: entrega cada mensagem de provedor no exchange do dono com `deliver`. Cada serviço declara as suas filas, uma por trabalho (`merkaly.api-payments`, `merkaly.signals-emails`), ligadas com chaves exatas (nunca `#`) a um ou mais exchanges. Um consumidor novo não toca no produtor, mas precisa existir antes: toda publicação usa `mandatory` e falha se nenhuma fila liga a chave. Modelo completo em [events](https://docs.merkaly.io/tecnico/nest/events).
 
 **Health check**: o pacote não registra controllers. O Swagger servido em `/` responde 200 e funciona como health check.
 
@@ -126,7 +130,7 @@ LoggerModule.forRootAsync({
 
 ### Mensagens
 
-Contrato completo e catálogo em [`docs/events.md`](docs/events.md). Mensagens de negócio normalizadas (`payment.received`, nunca `asaas.payment_received`): se o provedor muda, o consumidor não muda. O `type` é uma string do catálogo (pontos, minúsculas, validada no boot); o pacote não exporta enums de serviços nem de mensagens, só os tipos de `data` (`PaymentRef`, `SupplierOrderStatusChanged`, `IdentitySignupRequested`...).
+Contrato completo e catálogo em [events](https://docs.merkaly.io/tecnico/nest/events). Mensagens de negócio normalizadas (`payment.received`, nunca `asaas.payment_received`): se o provedor muda, o consumidor não muda. O `type` é uma string do catálogo (pontos, minúsculas, validada no boot); o pacote não exporta enums de serviços nem de mensagens, só os tipos de `data` (`PaymentRef`, `SupplierOrderStatusChanged`, `IdentitySignupRequested`...).
 
 | Classe | Publica | Exchange | Handler | Resposta |
 | --- | --- | --- | --- | --- |
@@ -190,7 +194,7 @@ Os handlers ficam em controllers. A mesma chave duas vezes na mesma fila derruba
 | Já processado (com `inbox`) | `ack` sem rodar o handler. |
 | Sem handler para a chave ou `pattern` diferente da routing key | `<fila>.dlq` (nunca `ack` silencioso). |
 
-Todo descarte para a `.dlq` loga uma linha `ERROR` no grupo `DLQ`. A fila principal descarta para a `.dlq` o que ficar 7 dias sem consumo; o limite de 10.000 mensagens e a `.dlq` de 14 dias vêm das operator policies do broker (`docs/events.md`, "Límites y políticas del broker").
+Todo descarte para a `.dlq` loga uma linha `ERROR` no grupo `DLQ`. A fila principal descarta para a `.dlq` o que ficar 7 dias sem consumo; o limite de 10.000 mensagens e a `.dlq` de 14 dias vêm das operator policies do broker (https://docs.merkaly.io/tecnico/nest/events, "Límites y políticas del broker").
 
 ### Invoke (request-reply)
 
