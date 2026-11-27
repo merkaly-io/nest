@@ -149,7 +149,7 @@ await this.events.deliver({ service: 'payments', type: 'payment.received' }, { .
   id: `asaas:${body.id}`, source: 'asaas', organization, occurredAt, raw: { type: body.event, payload },
 });
 
-await this.events.command({ service: 'signals', type: 'email.send' }, { to, subject, text }, { id: notification.id });
+await this.events.command<EmailSendData>({ service: 'signals', type: EMAIL_SEND }, { surface: 'store', to, subject, content: { text } }, { id: notification.id });
 ```
 
 Consumidor:
