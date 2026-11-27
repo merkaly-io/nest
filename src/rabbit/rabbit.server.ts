@@ -192,7 +192,7 @@ export class MerkalyQueueServer extends MerkalyServer {
       prefetchCount: options.prefetchCount ?? DEFAULT_PREFETCH,
       arguments: {
         // Frozen: changing them makes the broker refuse the redeclare (PRECONDITION_FAILED).
-        // Production overrides overflow and limits with the merkaly-work operator policy (docs/events.md)
+        // Production overrides overflow and limits with the merkaly-work operator policy (https://docs.merkaly.io/tecnico/nest/events)
         'x-message-ttl': WEEK, // unconsumed for a week: to the .dlq
         'x-max-length': 10_000,
         'x-overflow': 'drop-head', // reject-publish-dlx under the policy
